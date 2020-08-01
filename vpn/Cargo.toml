@@ -1,0 +1,16 @@
+[package]
+name = "vpn"
+version = "0.1.0"
+authors = ["Sirius <sirius@x250>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libc = "0.2"
+anyhow = "1.0"
+tun = { path = "../../../meh/rust-tun" }
+smol = "0.3"
+blocking = { path = "../../../stjepang/blocking" }
+clap = "3.0.0-beta.1"
+futures-lite = "0.1"
