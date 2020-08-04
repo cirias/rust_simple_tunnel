@@ -9,8 +9,10 @@ edition = "2018"
 [dependencies]
 libc = "0.2"
 anyhow = "1.0"
-tun = { path = "../../../meh/rust-tun" }
+# tun = { path = "../../../meh/rust-tun" }
+tun = "0.5"
 smol = "0.3"
-blocking = { path = "../../../stjepang/blocking" }
+# blocking = { path = "../../../stjepang/blocking" }
 clap = "3.0.0-beta.1"
-futures-lite = "0.1"
+# futures-lite = "0.1"
+futures-util = { version = "0.3", features = ["std", "io"] }

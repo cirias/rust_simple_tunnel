@@ -8,6 +8,7 @@ use tun::{platform::posix::Fd, platform::Device as Tun, IntoAddress};
 const IP_PACKET_HEADER_MIN_SIZE: usize = 20;
 const IP_PACKET_HEADER_MAX_SIZE: usize = 32;
 const MTU: usize = 1500;
+const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
 pub struct PeerInfo {
     ip: Ipv4Addr,
@@ -47,24 +48,23 @@ impl<Ctr: Connector> Endpoint<Ctr> {
     }
 
     pub async fn read_write(self) -> Result<()> {
+        let conn_w = self.conn;
+        let conn_r = conn_w.try_clone()?;
+        let conn_r = futures_util::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, conn_r);
+
         let tun1 = self.tun;
-        let conn1 = self.conn;
-
         let tun2 = try_clone_tun_fd(&tun1)?;
-        let conn2 = conn1.try_clone()?;
-
-        let tun1 = blocking::Unblock::new(tun1);
-        let tun2 = blocking::Unblock::new(tun2);
+        let tun_w = smol::Async::new(tun1).context("could not create async tun for write")?;
+        let tun_r = smol::Async::new(tun2).context("could not create async tun for read")?;
+        let tun_r = futures_util::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, tun_r);
 
         let conn_to_tun = smol::Task::spawn(async {
-            copy_packet(conn1, tun1)
-                // futures_lite::io::copy(conn1, tun1)
+            copy_packet(conn_r, tun_w)
                 .await
                 .context("could not copy conn to tun")
         });
         let tun_to_conn = smol::Task::spawn(async {
-            copy_packet(tun2, conn2)
-                // futures_lite::io::copy(tun2, conn2)
+            copy_packet(tun_r, conn_w)
                 .await
                 .context("could not copy tun to conn")
         });
@@ -84,22 +84,9 @@ pub async fn copy_packet<W: AsyncWrite + Unpin + Send, R: AsyncRead + Unpin + Se
             .await
             .context("could not read packet")?;
         let buf = &packet.0[..];
-        /*
-         * println!("{:?}", buf);
-         * let mut n = 0;
-         * while n < buf.len() {
-         *     let w = dst.write(&buf[n..]).await.context("could not write")?;
-         *     println!("written: {}", w);
-         *     if w == 0 {
-         *         panic!("write zero: {:?}", &buf[n..]);
-         *     }
-         *     n += w;
-         * }
-         */
         dst.write_all(buf)
             .await
             .with_context(|| format!("could not write packet: {:?}", buf))?;
-        dst.flush().await.context("could not flush")?;
     }
 }
 
@@ -134,30 +121,24 @@ pub async fn read_packet<R: AsyncRead + Unpin>(mut r: R) -> io::Result<Packet> {
     buf.resize(len, 0);
     r.read_exact(&mut buf[IP_PACKET_HEADER_MIN_SIZE..len])
         .await?;
-    // println!("packet: {:X?}", buf);
 
     Ok(packet)
 }
 
 pub fn try_clone_tun_fd(tun: &Tun) -> io::Result<Fd> {
     use std::os::unix::io::AsRawFd;
-    Ok(Fd::new(tun.as_raw_fd()).unwrap())
-    /*
-     * let raw_fd = tun.as_raw_fd();
-     * cvt(unsafe { libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 0) })
-     *     .map(|raw_fd| Fd::new(raw_fd).unwrap())
-     */
+    let raw_fd = tun.as_raw_fd();
+    cvt(unsafe { libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 0) })
+        .map(|raw_fd| Fd::new(raw_fd).unwrap())
 }
 
-/*
- * fn cvt(t: i32) -> io::Result<i32> {
- *     if t == -1 {
- *         Err(io::Error::last_os_error())
- *     } else {
- *         Ok(t)
- *     }
- * }
- */
+fn cvt(t: i32) -> io::Result<i32> {
+    if t == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(t)
+    }
+}
 
 pub trait Connector {
     type Connection: AsyncRead + AsyncWrite + TryClone + Unpin + Send + 'static;
