@@ -26,7 +26,7 @@ async fn try_run(args: Args) -> Result<()> {
 
     let endpoint = Endpoint::new(&args.ip, connector).await?;
 
-    endpoint.read_write().await?;
+    endpoint.run().await?;
 
     Ok(())
 }

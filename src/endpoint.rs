@@ -1,7 +1,7 @@
 use std::io;
 use std::net::Ipv4Addr;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use smol::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tun::{platform::posix::Fd, platform::Device as Tun, IntoAddress};
 
@@ -18,12 +18,9 @@ pub struct Packet(Vec<u8>);
 
 impl Packet {
     fn with_capacity(cap: usize) -> Self {
+        // TODO reduce memory allocation with a buffer pool, but that maybe even slower
         Packet(Vec::with_capacity(cap))
     }
-}
-
-impl Drop for Packet {
-    fn drop(&mut self) {}
 }
 
 pub struct Endpoint<Ctr: Connector> {
@@ -42,28 +39,32 @@ impl<Ctr: Connector> Endpoint<Ctr> {
         let peer_ip = peer_info.ip;
         let mut config: tun::Configuration = Default::default();
         config.address(ip).destination(peer_ip).mtu(MTU as i32).up();
-        let tun = tun::create(&config)?; //.or_else(|e| Err(anyhow!("could not create tun: {:?}", e)))
+        let tun =
+            tun::create(&config).or_else(|e| Err(anyhow!("could not create tun: {:?}", e)))?;
 
         Ok(Self { conn, tun })
     }
 
-    pub async fn read_write(self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         let conn_w = self.conn;
         let conn_r = conn_w.try_clone()?;
-        let conn_r = futures_util::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, conn_r);
 
         let tun1 = self.tun;
         let tun2 = try_clone_tun_fd(&tun1)?;
         let tun_w = smol::Async::new(tun1).context("could not create async tun for write")?;
         let tun_r = smol::Async::new(tun2).context("could not create async tun for read")?;
-        let tun_r = futures_util::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, tun_r);
 
         let conn_to_tun = smol::Task::spawn(async {
+            // use BufReader to reduce calling of systemcall `read`
+            let conn_r = futures_util::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, conn_r);
             copy_packet(conn_r, tun_w)
                 .await
                 .context("could not copy conn to tun")
         });
         let tun_to_conn = smol::Task::spawn(async {
+            // BufReader is required. Tun device driver doesn't provide an internal read buffer.
+            // So without BufReader, `read_exact` will cause the lost of the unread data.
+            let tun_r = futures_util::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, tun_r);
             copy_packet(tun_r, conn_w)
                 .await
                 .context("could not copy tun to conn")
