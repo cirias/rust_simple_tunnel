@@ -16,3 +16,4 @@ smol = "0.3"
 clap = "3.0.0-beta.1"
 # futures-lite = "0.1"
 futures-util = { version = "0.3", features = ["std", "io"] }
+async-tungstenite = { version = "0.8" }
