@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 libc = "0.2"
 anyhow = "1.0"
+async-trait = { version = "0.1" }
 # tun = { path = "../../../meh/rust-tun" }
 tun = "0.5"
 smol = "0.3"

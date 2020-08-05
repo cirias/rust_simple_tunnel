@@ -3,19 +3,70 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use anyhow::anyhow;
+use async_trait::async_trait;
 use async_tungstenite::{
+    accept_async, client_async,
     tungstenite::{error::Error as WsError, Message},
     WebSocketStream,
 };
 use futures_util::sink::Sink;
-use futures_util::stream::Stream;
+use futures_util::stream::{SplitSink, SplitStream, Stream};
 use smol::io::{AsyncRead, AsyncWrite};
 
-pub struct Connection<T> {
-    inner: WebSocketStream<T>,
+use super::endpoint::*;
+
+pub struct Listener<T> {
+    pub connector: T,
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for Connection<T> {
+#[async_trait]
+impl<T: Connector + Send + Sync> Connector for Listener<T> {
+    type Connection = Connection<WebSocketStream<T::Connection>>;
+
+    async fn connect(&self) -> io::Result<Self::Connection> {
+        let conn = self.connector.connect().await?;
+        let socket = accept_async(conn)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        Ok(Connection { inner: socket })
+    }
+}
+
+pub struct Client<T> {
+    pub connector: T,
+    pub url: String,
+}
+
+#[async_trait]
+impl<T: Connector + Send + Sync> Connector for Client<T> {
+    type Connection = Connection<WebSocketStream<T::Connection>>;
+
+    async fn connect(&self) -> io::Result<Self::Connection> {
+        let conn = self.connector.connect().await?;
+        let (socket, _resp) = client_async(self.url.clone(), conn)
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        Ok(Connection { inner: socket })
+    }
+}
+
+pub struct Connection<T> {
+    inner: T,
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Split for Connection<WebSocketStream<T>> {
+    type Write = Connection<SplitSink<WebSocketStream<T>, Message>>;
+    type Read = Connection<SplitStream<WebSocketStream<T>>>;
+    fn try_split(self) -> io::Result<(Self::Write, Self::Read)> {
+        use futures_util::stream::StreamExt;
+        let (w, r) = self.inner.split();
+        Ok((Connection { inner: w }, Connection { inner: r }))
+    }
+}
+
+impl<T: Stream<Item = Result<Message, WsError>> + Unpin> AsyncRead for Connection<T> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
@@ -47,13 +98,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for Connection<T> {
                 anyhow!("read buffer is smaller than received"),
             )));
         }
-        buf.copy_from_slice(&received);
+        buf[..received.len()].copy_from_slice(&received);
 
         Poll::Ready(Ok(received.len()))
     }
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Connection<T> {
+impl<T: Sink<Message, Error = WsError> + Unpin> AsyncWrite for Connection<T> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,

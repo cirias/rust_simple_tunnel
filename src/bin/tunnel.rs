@@ -13,7 +13,9 @@ fn main() {
             Mode::Client(_) => "192.168.200.2".to_string(),
         };
     }
-    smol::run(try_run(args)).unwrap();
+    if let Err(e) = smol::run(try_run(args)) {
+        eprintln!("{:?}", e);
+    }
 }
 
 #[derive(Clap)]
@@ -48,11 +50,16 @@ async fn try_run(args: Args) -> Result<()> {
         Mode::Server(config) => {
             let listener = std::net::TcpListener::bind(&config.listen)?;
             let connector = tcp::ListenConnector { listener };
+            let connector = websocket::Listener { connector };
             Endpoint::new(&args.ip, connector).await?.run().await
         }
         Mode::Client(config) => {
             let connector = tcp::StreamConnector {
                 addr: config.server,
+            };
+            let connector = websocket::Client {
+                connector,
+                url: "ws://www.example.com/ws".to_string(),
             };
             Endpoint::new(&args.ip, connector).await?.run().await
         }

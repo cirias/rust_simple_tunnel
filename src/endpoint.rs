@@ -2,6 +2,7 @@ use std::io;
 use std::net::Ipv4Addr;
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use smol::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tun::{platform::posix::Fd, platform::Device as Tun, IntoAddress};
 
@@ -31,7 +32,7 @@ pub struct Endpoint<Ctr: Connector> {
 impl<Ctr: Connector> Endpoint<Ctr> {
     pub async fn new<IP: IntoAddress>(ip: IP, connector: Ctr) -> Result<Self> {
         let ip = ip.into_address()?;
-        let mut conn = connector.connect()?;
+        let mut conn = connector.connect().await?;
 
         write_peer_info(&mut conn, PeerInfo { ip }).await?;
         let peer_info = read_peer_info(&mut conn).await?;
@@ -46,8 +47,7 @@ impl<Ctr: Connector> Endpoint<Ctr> {
     }
 
     pub async fn run(self) -> Result<()> {
-        let conn_w = self.conn;
-        let conn_r = conn_w.try_clone()?;
+        let (conn_w, conn_r) = self.conn.try_split()?;
 
         let tun1 = self.tun;
         let tun2 = try_clone_tun_fd(&tun1)?;
@@ -88,6 +88,9 @@ pub async fn copy_packet<W: AsyncWrite + Unpin + Send, R: AsyncRead + Unpin + Se
         dst.write_all(buf)
             .await
             .with_context(|| format!("could not write packet: {:?}", buf))?;
+        dst.flush()
+            .await
+            .with_context(|| format!("could not flush"))?;
     }
 }
 
@@ -141,12 +144,17 @@ fn cvt(t: i32) -> io::Result<i32> {
     }
 }
 
+#[async_trait]
 pub trait Connector {
-    type Connection: AsyncRead + AsyncWrite + TryClone + Unpin + Send + 'static;
+    // TODO why it has to be static?
+    type Connection: AsyncRead + AsyncWrite + Split + Unpin + Send + 'static;
 
-    fn connect(&self) -> io::Result<Self::Connection>;
+    async fn connect(&self) -> io::Result<Self::Connection>;
 }
 
-pub trait TryClone: Sized {
-    fn try_clone(&self) -> io::Result<Self>;
+pub trait Split: Sized {
+    type Read: AsyncRead + Unpin + Send;
+    type Write: AsyncWrite + Unpin + Send;
+
+    fn try_split(self) -> io::Result<(Self::Write, Self::Read)>;
 }

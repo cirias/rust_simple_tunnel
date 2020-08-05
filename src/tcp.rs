@@ -3,6 +3,7 @@ use std::net;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use async_trait::async_trait;
 use smol::io::{AsyncRead, AsyncWrite};
 
 use super::endpoint::*;
@@ -11,10 +12,11 @@ pub struct ListenConnector {
     pub listener: net::TcpListener,
 }
 
+#[async_trait]
 impl Connector for ListenConnector {
     type Connection = Connection;
 
-    fn connect(&self) -> io::Result<Self::Connection> {
+    async fn connect(&self) -> io::Result<Self::Connection> {
         let (stream, _addr) = self.listener.accept()?;
         let inner = smol::Async::new(stream)?;
         Ok(Connection { inner })
@@ -25,10 +27,11 @@ pub struct StreamConnector<A: net::ToSocketAddrs> {
     pub addr: A,
 }
 
-impl<A: net::ToSocketAddrs> Connector for StreamConnector<A> {
+#[async_trait]
+impl<A: net::ToSocketAddrs + Sync> Connector for StreamConnector<A> {
     type Connection = Connection;
 
-    fn connect(&self) -> io::Result<Self::Connection> {
+    async fn connect(&self) -> io::Result<Self::Connection> {
         let stream = net::TcpStream::connect(&self.addr)?;
         let inner = smol::Async::new(stream)?;
         Ok(Connection { inner })
@@ -45,11 +48,13 @@ impl AsRef<smol::Async<net::TcpStream>> for Connection {
     }
 }
 
-impl TryClone for Connection {
-    fn try_clone(&self) -> io::Result<Self> {
+impl Split for Connection {
+    type Write = Connection;
+    type Read = Connection;
+    fn try_split(self) -> io::Result<(Self, Self)> {
         let stream = self.inner.get_ref().try_clone()?;
         let inner = smol::Async::new(stream)?;
-        Ok(Connection { inner })
+        Ok((self, Connection { inner }))
     }
 }
 
