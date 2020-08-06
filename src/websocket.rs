@@ -136,6 +136,18 @@ impl<T: Sink<Message, Error = WsError> + Unpin> AsyncWrite for Connection<T> {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
+    // TODO **BUG**
+    // This will send send multiple close message when `poll_ready` returns Ready but
+    // `poll_flush` does not.
+    //
+    // One solution is to store a future, and poll that future here.
+    // But base on my current rust knowledge, to achieve that without using unsafe,
+    // the only way is to use Arc and Mutex, which is quite complex.
+    // And it becomes worse when the poll fn has its own arguments.
+    // It will be more memory copy, and it has to assert that
+    // the args are the same for each poll call of the same future.
+    //
+    // This makes me feel, maybe using AsyncRead/AsyncWrite as the contract is not a good idea.
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut inner = Pin::new(&mut self.inner);
 
