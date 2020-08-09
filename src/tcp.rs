@@ -8,6 +8,7 @@ use smol::io::{AsyncRead, AsyncWrite};
 
 use super::endpoint::*;
 
+#[derive(Clone)]
 pub struct ListenConnector {
     pub listener: net::TcpListener,
 }
@@ -48,15 +49,17 @@ impl AsRef<smol::Async<net::TcpStream>> for Connection {
     }
 }
 
-impl Split for Connection {
-    type Write = Connection;
-    type Read = Connection;
-    fn try_split(self) -> io::Result<(Self, Self)> {
-        let stream = self.inner.get_ref().try_clone()?;
-        let inner = smol::Async::new(stream)?;
-        Ok((self, Connection { inner }))
-    }
-}
+/*
+ * impl Split for Connection {
+ *     type Write = Connection;
+ *     type Read = Connection;
+ *     fn try_split(self) -> io::Result<(Self, Self)> {
+ *         let stream = self.inner.get_ref().try_clone()?;
+ *         let inner = smol::Async::new(stream)?;
+ *         Ok((self, Connection { inner }))
+ *     }
+ * }
+ */
 
 impl AsyncRead for Connection {
     fn poll_read(

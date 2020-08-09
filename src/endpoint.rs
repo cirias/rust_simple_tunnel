@@ -1,5 +1,6 @@
 use std::io;
 use std::net::Ipv4Addr;
+use std::pin::Pin;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -34,8 +35,8 @@ impl<Ctr: Connector> Endpoint<Ctr> {
         let ip = ip.into_address()?;
         let mut conn = connector.connect().await?;
 
-        write_peer_info(&mut conn, PeerInfo { ip }).await?;
-        let peer_info = read_peer_info(&mut conn).await?;
+        write_peer_info(Pin::new(&mut conn), PeerInfo { ip }).await?;
+        let peer_info = read_peer_info(Pin::new(&mut conn)).await?;
 
         let peer_ip = peer_info.ip;
         let mut config: tun::Configuration = Default::default();
@@ -47,7 +48,7 @@ impl<Ctr: Connector> Endpoint<Ctr> {
     }
 
     pub async fn run(self) -> Result<()> {
-        let (conn_w, conn_r) = self.conn.try_split()?;
+        let (conn_r, conn_w) = futures_util::io::AsyncReadExt::split(self.conn);
 
         let tun1 = self.tun;
         let tun2 = try_clone_tun_fd(&tun1)?;
@@ -88,9 +89,11 @@ pub async fn copy_packet<W: AsyncWrite + Unpin + Send, R: AsyncRead + Unpin + Se
         dst.write_all(buf)
             .await
             .with_context(|| format!("could not write packet: {:?}", buf))?;
-        dst.flush()
-            .await
-            .with_context(|| format!("could not flush"))?;
+        /*
+         * dst.flush()
+         *     .await
+         *     .with_context(|| format!("could not flush"))?;
+         */
     }
 }
 
@@ -147,14 +150,7 @@ fn cvt(t: i32) -> io::Result<i32> {
 #[async_trait]
 pub trait Connector {
     // TODO why it has to be static?
-    type Connection: AsyncRead + AsyncWrite + Split + Unpin + Send + 'static;
+    type Connection: AsyncRead + AsyncWrite + Unpin + Send + 'static;
 
     async fn connect(&self) -> io::Result<Self::Connection>;
-}
-
-pub trait Split: Sized {
-    type Read: AsyncRead + Unpin + Send;
-    type Write: AsyncWrite + Unpin + Send;
-
-    fn try_split(self) -> io::Result<(Self::Write, Self::Read)>;
 }

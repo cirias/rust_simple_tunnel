@@ -10,11 +10,13 @@ use async_tungstenite::{
     WebSocketStream,
 };
 use futures_util::sink::Sink;
-use futures_util::stream::{SplitSink, SplitStream, Stream};
+use futures_util::stream::Stream;
+// use futures_util::stream::{SplitSink, SplitStream, Stream};
 use smol::io::{AsyncRead, AsyncWrite};
 
 use super::endpoint::*;
 
+#[derive(Clone)]
 pub struct Listener<T> {
     pub connector: T,
 }
@@ -29,10 +31,15 @@ impl<T: Connector + Send + Sync> Connector for Listener<T> {
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        Ok(Connection { inner: socket })
+        Ok(Connection {
+            inner: socket,
+            write_state: Default::default(),
+            close_state: Default::default(),
+        })
     }
 }
 
+#[derive(Clone)]
 pub struct Client<T> {
     pub connector: T,
     pub url: String,
@@ -48,23 +55,42 @@ impl<T: Connector + Send + Sync> Connector for Client<T> {
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        Ok(Connection { inner: socket })
+        Ok(Connection {
+            inner: socket,
+            write_state: Default::default(),
+            close_state: Default::default(),
+        })
     }
 }
 
 pub struct Connection<T> {
     inner: T,
+    write_state: MessageState,
+    close_state: MessageState,
 }
-
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Split for Connection<WebSocketStream<T>> {
-    type Write = Connection<SplitSink<WebSocketStream<T>, Message>>;
-    type Read = Connection<SplitStream<WebSocketStream<T>>>;
-    fn try_split(self) -> io::Result<(Self::Write, Self::Read)> {
-        use futures_util::stream::StreamExt;
-        let (w, r) = self.inner.split();
-        Ok((Connection { inner: w }, Connection { inner: r }))
-    }
-}
+/*
+ *
+ * impl<T: AsyncRead + AsyncWrite + Unpin + Send> Split for Connection<WebSocketStream<T>> {
+ *     type Write = Connection<SplitSink<WebSocketStream<T>, Message>>;
+ *     type Read = Connection<SplitStream<WebSocketStream<T>>>;
+ *     fn try_split(self) -> io::Result<(Self::Write, Self::Read)> {
+ *         use futures_util::stream::StreamExt;
+ *         let (w, r) = self.inner.split();
+ *         Ok((
+ *             Connection {
+ *                 inner: w,
+ *                 write_state: Default::default(),
+ *                 close_state: Default::default(),
+ *             },
+ *             Connection {
+ *                 inner: r,
+ *                 write_state: Default::default(),
+ *                 close_state: Default::default(),
+ *             },
+ *         ))
+ *     }
+ * }
+ */
 
 impl<T: Stream<Item = Result<Message, WsError>> + Unpin> AsyncRead for Connection<T> {
     fn poll_read(
@@ -104,28 +130,40 @@ impl<T: Stream<Item = Result<Message, WsError>> + Unpin> AsyncRead for Connectio
     }
 }
 
-impl<T: Sink<Message, Error = WsError> + Unpin> AsyncWrite for Connection<T> {
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncWrite for Connection<WebSocketStream<T>> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        let mut state = self.write_state.clone();
         let mut inner = Pin::new(&mut self.inner);
 
-        match inner
-            .as_mut()
-            .poll_ready(cx)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-        {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(_) => {
-                inner
-                    .start_send(Message::binary(buf.to_vec()))
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        loop {
+            if let Some(p) = (&mut state).step(cx, inner.as_mut(), || Message::binary(buf.to_vec()))
+            {
+                self.write_state = state;
+                return p.map_ok(|_| buf.len());
             }
-        };
-
-        Poll::Ready(Ok(buf.len()))
+        }
+        /*
+         *         let mut inner = Pin::new(&mut self.inner);
+         *
+         *         match inner
+         *             .as_mut()
+         *             .poll_ready(cx)
+         *             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+         *         {
+         *             Poll::Pending => return Poll::Pending,
+         *             Poll::Ready(_) => {
+         *                 inner
+         *                     .start_send(Message::binary(buf.to_vec()))
+         *                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+         *             }
+         *         };
+         *
+         *         Poll::Ready(Ok(buf.len()))
+         */
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -149,24 +187,77 @@ impl<T: Sink<Message, Error = WsError> + Unpin> AsyncWrite for Connection<T> {
     //
     // This makes me feel, maybe using AsyncRead/AsyncWrite as the contract is not a good idea.
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut state = self.close_state.clone();
         let mut inner = Pin::new(&mut self.inner);
 
-        match inner
+        // TODO should close the inner connection after flush
+        loop {
+            if let Some(p) = (&mut state).step(cx, inner.as_mut(), || Message::Close(None)) {
+                self.close_state = state;
+                return p;
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum MessageState {
+    MessageNotSent,
+    MessageSent,
+}
+
+impl Default for MessageState {
+    fn default() -> Self {
+        MessageState::MessageNotSent
+    }
+}
+
+impl MessageState {
+    fn poll_send_message<S: Sink<Message, Error = WsError> + Unpin>(
+        self: &mut Self,
+        cx: &mut Context<'_>,
+        mut sink: Pin<&mut S>,
+        message: impl FnOnce() -> Message,
+    ) -> Poll<io::Result<()>> {
+        match sink
             .as_mut()
             .poll_ready(cx)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
         {
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => Poll::Pending,
             Poll::Ready(_) => {
-                inner
-                    .start_send(Message::Close(None))
+                sink.as_mut()
+                    .start_send((message)())
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                *self = MessageState::MessageSent;
+                Poll::Ready(Ok(()))
             }
-        };
+        }
+    }
 
-        futures_util::ready!(Pin::new(&mut self.inner).poll_flush(cx))
+    fn poll_flush<S: Sink<Message, Error = WsError> + Unpin>(
+        self: &mut Self,
+        cx: &mut Context<'_>,
+        sink: Pin<&mut S>,
+    ) -> Poll<io::Result<()>> {
+        futures_util::ready!(sink.poll_flush(cx))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
+        *self = MessageState::MessageNotSent;
         Poll::Ready(Ok(()))
+    }
+
+    fn step<S: Sink<Message, Error = WsError> + Unpin>(
+        self: &mut Self,
+        cx: &mut Context<'_>,
+        sink: Pin<&mut S>,
+        message: impl FnOnce() -> Message,
+    ) -> Option<Poll<io::Result<()>>> {
+        match &self {
+            MessageState::MessageNotSent => match self.poll_send_message(cx, sink, message) {
+                Poll::Ready(Ok(())) => None,
+                o => Some(o),
+            },
+            MessageState::MessageSent => Some(self.poll_flush(cx, sink)),
+        }
     }
 }

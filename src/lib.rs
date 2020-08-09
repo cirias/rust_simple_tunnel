@@ -1,4 +1,5 @@
 mod endpoint;
+pub mod retry;
 pub mod tcp;
 pub mod websocket;
 
