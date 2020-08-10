@@ -16,13 +16,12 @@ use smol::io::{AsyncRead, AsyncWrite};
 
 use super::endpoint::*;
 
-#[derive(Clone)]
-pub struct Listener<T> {
+pub struct ListenConnector<T> {
     pub connector: T,
 }
 
 #[async_trait]
-impl<T: Connector + Send + Sync> Connector for Listener<T> {
+impl<T: Connector + Send + Sync> Connector for ListenConnector<T> {
     type Connection = Connection<WebSocketStream<T::Connection>>;
 
     async fn connect(&self) -> io::Result<Self::Connection> {
@@ -39,14 +38,13 @@ impl<T: Connector + Send + Sync> Connector for Listener<T> {
     }
 }
 
-#[derive(Clone)]
-pub struct Client<T> {
+pub struct ClientConnector<T> {
     pub connector: T,
     pub url: String,
 }
 
 #[async_trait]
-impl<T: Connector + Send + Sync> Connector for Client<T> {
+impl<T: Connector + Send + Sync> Connector for ClientConnector<T> {
     type Connection = Connection<WebSocketStream<T::Connection>>;
 
     async fn connect(&self) -> io::Result<Self::Connection> {
@@ -121,7 +119,11 @@ impl<T: Stream<Item = Result<Message, WsError>> + Unpin> AsyncRead for Connectio
         if received.len() > buf.len() {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                anyhow!("read buffer is smaller than received"),
+                anyhow!(
+                    "read buffer({}) is smaller than received({})",
+                    buf.len(),
+                    received.len()
+                ),
             )));
         }
         buf[..received.len()].copy_from_slice(&received);

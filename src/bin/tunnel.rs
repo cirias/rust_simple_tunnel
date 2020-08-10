@@ -50,17 +50,19 @@ async fn try_run(args: Args) -> Result<()> {
         Mode::Server(config) => {
             let listener = std::net::TcpListener::bind(&config.listen)?;
             let connector = tcp::ListenConnector { listener };
-            let connector = websocket::Listener { connector };
+            let connector = websocket::ListenConnector { connector };
+            let connector = retry::RetryConnector::new(connector);
             Endpoint::new(&args.ip, connector).await?.run().await
         }
         Mode::Client(config) => {
             let connector = tcp::StreamConnector {
                 addr: config.server,
             };
-            let connector = websocket::Client {
+            let connector = websocket::ClientConnector {
                 connector,
                 url: "ws://www.example.com/ws".to_string(),
             };
+            let connector = retry::RetryConnector::new(connector);
             Endpoint::new(&args.ip, connector).await?.run().await
         }
     }

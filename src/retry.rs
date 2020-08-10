@@ -1,33 +1,44 @@
 use std::future::Future;
 use std::io;
+use std::marker::PhantomPinned;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use smol::io::{AsyncRead, AsyncWrite};
 
 use super::endpoint::*;
 
-pub struct Retrier<T> {
-    pub inner: T,
+pub struct RetryConnector<T> {
+    pub connector: Arc<T>,
+}
+
+impl<T> RetryConnector<T> {
+    pub fn new(connector: T) -> Self {
+        Self {
+            connector: Arc::new(connector),
+        }
+    }
 }
 
 #[async_trait]
-impl<T: 'static + Connector + Clone + Send + Sync + Unpin> Connector for Retrier<T> {
+impl<T: 'static + Connector + Send + Sync> Connector for RetryConnector<T> {
     type Connection = Pin<Box<RetryConnection<T>>>;
 
     async fn connect(&self) -> io::Result<Self::Connection> {
-        let conn = self.inner.connect().await?;
-        let connector = self.inner.clone();
+        let conn = self.connector.connect().await?;
+        let connector = self.connector.clone();
 
         Ok(RetryConnection::new(connector, conn))
     }
 }
 
 pub struct RetryConnection<T: Connector> {
-    connector: T,
+    connector: Arc<T>,
     state: State<T>,
-    _marker: std::marker::PhantomPinned,
+    _marker: PhantomPinned,
 }
 
 enum State<T: Connector> {
@@ -36,11 +47,11 @@ enum State<T: Connector> {
 }
 
 impl<T: 'static + Connector + Send + Sync> RetryConnection<T> {
-    fn new(connector: T, conn: T::Connection) -> Pin<Box<Self>> {
+    fn new(connector: Arc<T>, conn: T::Connection) -> Pin<Box<Self>> {
         let c = RetryConnection {
             connector,
             state: State::Ready(conn),
-            _marker: std::marker::PhantomPinned,
+            _marker: PhantomPinned,
         };
         Box::pin(c)
     }
@@ -51,10 +62,7 @@ impl<T: 'static + Connector + Send + Sync> RetryConnection<T> {
         mut f: impl FnMut(Pin<&mut T::Connection>, &mut Context) -> Poll<io::Result<D>>,
     ) -> Poll<io::Result<D>> {
         let this = unsafe { self.get_unchecked_mut() };
-        let cr = unsafe {
-            let ptr: *const T = &this.connector;
-            &*ptr
-        };
+        let cr = unsafe { &*(this.connector.as_ref() as *const T) };
         loop {
             match &mut this.state {
                 State::Ready(cn) => {
@@ -105,7 +113,10 @@ impl<T: 'static + Connector + Send + Sync> AsyncWrite for RetryConnection<T> {
 
 fn is_connection_error<T>(res: &io::Result<T>) -> bool {
     if let Err(err) = res {
-        return err.kind() == io::ErrorKind::UnexpectedEof;
+        return match err.kind() {
+            io::ErrorKind::UnexpectedEof | io::ErrorKind::Other => true,
+            _ => false,
+        };
     }
     false
 }
@@ -116,6 +127,6 @@ async fn connect_with_retry<T: Connector>(connector: &T) -> io::Result<T::Connec
             // TODO what are the errors we shouldn't retry
             return Ok(conn);
         }
-        smol::Timer::new(std::time::Duration::from_secs(1)).await;
+        smol::Timer::new(Duration::from_secs(1)).await;
     }
 }

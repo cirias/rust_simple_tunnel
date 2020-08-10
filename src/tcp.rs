@@ -8,7 +8,6 @@ use smol::io::{AsyncRead, AsyncWrite};
 
 use super::endpoint::*;
 
-#[derive(Clone)]
 pub struct ListenConnector {
     pub listener: net::TcpListener,
 }
