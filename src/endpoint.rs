@@ -1,16 +1,13 @@
 use std::io;
 use std::net::Ipv4Addr;
-use std::pin::Pin;
 
 use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
-use smol::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tun::{platform::posix::Fd, platform::Device as Tun, IntoAddress};
 
 const IP_PACKET_HEADER_MIN_SIZE: usize = 20;
 const IP_PACKET_HEADER_MAX_SIZE: usize = 32;
 const MTU: usize = 1500;
-const DEFAULT_BUF_SIZE: usize = 8 * 1024;
+// const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
 pub struct PeerInfo {
     ip: Ipv4Addr,
@@ -31,12 +28,12 @@ pub struct Endpoint<Ctr: Connector> {
 }
 
 impl<Ctr: Connector> Endpoint<Ctr> {
-    pub async fn new<IP: IntoAddress>(ip: IP, connector: Ctr) -> Result<Self> {
+    pub fn new<IP: IntoAddress>(ip: IP, connector: Ctr) -> Result<Self> {
         let ip = ip.into_address()?;
-        let mut conn = connector.connect().await?;
+        let mut conn = connector.connect()?;
 
-        write_peer_info(Pin::new(&mut conn), PeerInfo { ip }).await?;
-        let peer_info = read_peer_info(Pin::new(&mut conn)).await?;
+        write_peer_info(&mut conn, PeerInfo { ip })?;
+        let peer_info = read_peer_info(&mut conn)?;
 
         let peer_ip = peer_info.ip;
         let mut config: tun::Configuration = Default::default();
@@ -47,87 +44,74 @@ impl<Ctr: Connector> Endpoint<Ctr> {
         Ok(Self { conn, tun })
     }
 
-    pub async fn run(self) -> Result<()> {
-        let (conn_r, conn_w) = futures_util::io::AsyncReadExt::split(self.conn);
+    pub fn run(self) -> Result<()> {
+        let mut tun_w = self.tun;
+        let mut tun_r = try_clone_tun_fd(&tun_w)?;
 
-        let tun1 = self.tun;
-        let tun2 = try_clone_tun_fd(&tun1)?;
-        let tun_w = smol::Async::new(tun1).context("could not create async tun for write")?;
-        let tun_r = smol::Async::new(tun2).context("could not create async tun for read")?;
+        let (mut conn_w, mut conn_r) = self.conn.split()?;
 
-        let conn_to_tun = smol::Task::spawn(async {
-            // use BufReader to reduce calling of systemcall `read`
-            let conn_r = futures_util::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, conn_r);
-            copy_packet(conn_r, tun_w)
-                .await
-                .context("could not copy conn to tun")
-        });
-        let tun_to_conn = smol::Task::spawn(async {
-            // BufReader is required. Tun device driver doesn't provide an internal read buffer.
-            // So without BufReader, `read_exact` will cause the lost of the unread data.
-            let tun_r = futures_util::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, tun_r);
-            copy_packet(tun_r, conn_w)
-                .await
-                .context("could not copy tun to conn")
-        });
-
-        smol::future::try_join(tun_to_conn, conn_to_tun).await?;
-
+        let res: Result<Vec<_>> = easy_parallel::Parallel::new()
+            .add(move || {
+                io::copy(&mut conn_r, &mut tun_w).context("could not copy conn to tun")
+                /*
+                 * // use BufReader to reduce calling of systemcall `read`
+                 * let conn_r = io::BufReader::with_capacity(DEFAULT_BUF_SIZE, conn_r);
+                 * copy_packet(conn_r, tun_w).context("could not copy conn to tun")
+                 */
+            })
+            .add(move || {
+                io::copy(&mut tun_r, &mut conn_w).context("could not copy tun to conn")
+                /*
+                 * // BufReader is required. Tun device driver doesn't provide an internal read buffer.
+                 * // So without BufReader, `read_exact` will cause the lost of the unread data.
+                 * let tun_r = io::BufReader::with_capacity(DEFAULT_BUF_SIZE, tun_r);
+                 * copy_packet(tun_r, conn_w).context("could not copy tun to conn")
+                 */
+            })
+            .run()
+            .into_iter()
+            .collect();
+        res?;
         Ok(())
     }
 }
 
-pub async fn copy_packet<W: AsyncWrite + Unpin + Send, R: AsyncRead + Unpin + Send>(
-    mut src: R,
-    mut dst: W,
-) -> Result<()> {
+pub fn copy_packet<W: io::Write, R: io::Read>(mut src: R, mut dst: W) -> Result<()> {
     loop {
-        let packet = read_packet(&mut src)
-            .await
-            .context("could not read packet")?;
+        let packet = read_packet(&mut src).context("could not read packet")?;
         let buf = &packet.0[..];
         dst.write_all(buf)
-            .await
             .with_context(|| format!("could not write packet: {:?}", buf))?;
-        /*
-         * dst.flush()
-         *     .await
-         *     .with_context(|| format!("could not flush"))?;
-         */
     }
 }
 
-pub async fn read_peer_info<R: AsyncRead + Unpin>(mut r: R) -> io::Result<PeerInfo> {
+pub fn read_peer_info<R: io::Read>(mut r: R) -> io::Result<PeerInfo> {
     // TODO add checksum
     let mut ip_buf = [0; 4];
-    r.read_exact(&mut ip_buf).await?;
+    r.read_exact(&mut ip_buf)?;
 
     let ip = Ipv4Addr::new(ip_buf[0], ip_buf[1], ip_buf[2], ip_buf[3]);
     Ok(PeerInfo { ip })
 }
 
-pub async fn write_peer_info<W: AsyncWrite + Unpin>(
-    mut w: W,
-    peer_info: PeerInfo,
-) -> io::Result<()> {
+pub fn write_peer_info<W: io::Write + Unpin>(mut w: W, peer_info: PeerInfo) -> io::Result<()> {
     // TODO add checksum
-    w.write_all(&peer_info.ip.octets()).await?;
+    w.write_all(&peer_info.ip.octets())?;
     Ok(())
 }
 
-pub async fn read_packet<R: AsyncRead + Unpin>(mut r: R) -> io::Result<Packet> {
+pub fn read_packet<R: io::Read>(mut r: R) -> io::Result<Packet> {
     use std::convert::TryInto;
 
     let mut packet = Packet::with_capacity(IP_PACKET_HEADER_MAX_SIZE + MTU);
 
     let buf = &mut packet.0;
     buf.resize(IP_PACKET_HEADER_MIN_SIZE, 0); // it won't allocate memory if it is already sufficient
-    r.read_exact(&mut buf[0..IP_PACKET_HEADER_MIN_SIZE]).await?;
+    r.read_exact(&mut buf[0..IP_PACKET_HEADER_MIN_SIZE])?;
 
     let len = u16::from_be_bytes(buf[2..4].try_into().unwrap()) as usize;
     buf.resize(len, 0);
-    r.read_exact(&mut buf[IP_PACKET_HEADER_MIN_SIZE..len])
-        .await?;
+    r.read_exact(&mut buf[IP_PACKET_HEADER_MIN_SIZE..len])?;
 
     Ok(packet)
 }
@@ -147,10 +131,35 @@ fn cvt(t: i32) -> io::Result<i32> {
     }
 }
 
-#[async_trait]
 pub trait Connector {
-    // TODO why it has to be static?
-    type Connection: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+    type Connection: io::Write + io::Read + Split + Send;
 
-    async fn connect(&self) -> io::Result<Self::Connection>;
+    fn connect(&self) -> io::Result<Self::Connection>;
+}
+
+pub trait Split {
+    type Writer: io::Write + Send;
+    type Reader: io::Read + Send;
+
+    fn split(self) -> io::Result<(Self::Writer, Self::Reader)>;
+}
+
+pub struct Connection<T> {
+    pub inner: T,
+}
+
+impl<T: io::Read> io::Read for Connection<T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<T: io::Write> io::Write for Connection<T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }

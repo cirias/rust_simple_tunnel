@@ -48,11 +48,9 @@ struct ServerConfig {
 async fn try_run(args: Args) -> Result<()> {
     match args.mode {
         Mode::Server(config) => {
-            let listener = std::net::TcpListener::bind(&config.listen)?;
-            let connector = tcp::ListenConnector { listener };
+            let connector = tcp::ListenConnector::new(&config.listen)?;
             let connector = websocket::ListenConnector { connector };
-            let connector = retry::RetryConnector::new(connector);
-            Endpoint::new(&args.ip, connector).await?.run().await
+            Endpoint::new(&args.ip, connector)?.run()
         }
         Mode::Client(config) => {
             let connector = tcp::StreamConnector {
@@ -62,8 +60,7 @@ async fn try_run(args: Args) -> Result<()> {
                 connector,
                 url: "ws://www.example.com/ws".to_string(),
             };
-            let connector = retry::RetryConnector::new(connector);
-            Endpoint::new(&args.ip, connector).await?.run().await
+            Endpoint::new(&args.ip, connector)?.run()
         }
     }
 }
