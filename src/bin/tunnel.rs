@@ -4,7 +4,6 @@ use clap::{Clap, FromArgMatches, IntoApp};
 use simple_vpn::*;
 
 fn main() {
-    // let args = Args::parse();
     let matches = <Args as IntoApp>::into_app().get_matches();
     let mut args = <Args as FromArgMatches>::from_arg_matches(&matches);
     if matches.occurrences_of("ip") == 0 {
@@ -13,7 +12,7 @@ fn main() {
             Mode::Client(_) => "192.168.200.2".to_string(),
         };
     }
-    if let Err(e) = smol::run(try_run(args)) {
+    if let Err(e) = try_run(args) {
         eprintln!("{:?}", e);
     }
 }
@@ -45,10 +44,15 @@ struct ServerConfig {
     listen: String,
 }
 
-async fn try_run(args: Args) -> Result<()> {
+fn try_run(args: Args) -> Result<()> {
     match args.mode {
         Mode::Server(config) => {
             let connector = tcp::ListenConnector::new(&config.listen)?;
+            let connector = tls::ServerConnector {
+                connector,
+                pkcs12_path: "./identity.pfx".into(),
+                pkcs12_password: "passw0rd".into(),
+            };
             let connector = websocket::ListenConnector { connector };
             Endpoint::new(&args.ip, connector)?.run()
         }
@@ -56,9 +60,14 @@ async fn try_run(args: Args) -> Result<()> {
             let connector = tcp::StreamConnector {
                 addr: config.server,
             };
+            let connector = tls::ClientConnector {
+                connector,
+                hostname: "www.example.com".into(),
+                accept_invalid_certs: true,
+            };
             let connector = websocket::ClientConnector {
                 connector,
-                url: "ws://www.example.com/ws".to_string(),
+                url: "ws://www.example.com/ws".into(),
             };
             Endpoint::new(&args.ip, connector)?.run()
         }

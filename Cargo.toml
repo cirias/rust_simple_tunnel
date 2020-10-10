@@ -9,13 +9,16 @@ edition = "2018"
 [dependencies]
 libc = "0.2"
 anyhow = "1.0"
-async-trait = { version = "0.1" }
+# async-trait = { version = "0.1" }
 # tun = { path = "../../../meh/rust-tun" }
 tun = "0.5"
-smol = "0.3"
-easy-parallel = "3.1"
+# smol = "0.3"
+# easy-parallel = "3.1"
 # blocking = { path = "../../../stjepang/blocking" }
 clap = "3.0.0-beta.1"
 # futures-lite = "0.1"
-futures-util = { version = "0.3", features = ["std", "io"] }
+# futures-util = { version = "0.3", features = ["std", "io"] }
 tungstenite = { version = "0.11", default-features = false }
+native-tls = "0.2"
+# polling = "2.0"
+log = "0.4"

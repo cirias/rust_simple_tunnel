@@ -35,13 +35,3 @@ impl<A: net::ToSocketAddrs> Connector for StreamConnector<A> {
         Ok(Connection { inner: stream })
     }
 }
-
-impl Split for Connection<net::TcpStream> {
-    type Writer = net::TcpStream;
-    type Reader = net::TcpStream;
-
-    fn split(self) -> io::Result<(Self::Writer, Self::Reader)> {
-        let stream = self.inner.try_clone()?;
-        Ok((self.inner, stream))
-    }
-}
