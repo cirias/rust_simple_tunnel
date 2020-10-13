@@ -2,7 +2,7 @@ use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 
 use anyhow::anyhow;
-use tungstenite::{accept, client, Message, WebSocket};
+use tungstenite::{accept, client, Error, Message, WebSocket};
 
 use super::endpoint::*;
 
@@ -52,10 +52,10 @@ impl<T: AsRawFd> AsRawFd for WebSocketReadWriter<T> {
 impl<T: io::Write + io::Read> io::Read for WebSocketReadWriter<T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
-            let m = self
-                .inner
-                .read_message()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            let m = self.inner.read_message().map_err(|e| match e {
+                Error::Io(e) if e.kind() == io::ErrorKind::WouldBlock => e,
+                _ => io::Error::new(io::ErrorKind::Other, e),
+            })?;
             let received = match m {
                 Message::Binary(received) => received,
                 _ => continue,
@@ -81,8 +81,12 @@ impl<T: io::Write + io::Read> io::Write for WebSocketReadWriter<T> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner
             .write_message(Message::binary(buf.to_vec()))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        // TODO ignore WouldBlock, because in that case, write_message will still queue the message.
+            .or_else(|e| match e {
+                // ignore WouldBlock, because in that case, write_message will still queue the message.
+                Error::Io(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
+                _ => Err(io::Error::new(io::ErrorKind::Other, e)),
+            })?;
+
         Ok(buf.len())
     }
 

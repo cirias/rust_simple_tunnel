@@ -4,6 +4,8 @@ use clap::{Clap, FromArgMatches, IntoApp};
 use simple_vpn::*;
 
 fn main() {
+    env_logger::init();
+
     let matches = <Args as IntoApp>::into_app().get_matches();
     let mut args = <Args as FromArgMatches>::from_arg_matches(&matches);
     if matches.occurrences_of("ip") == 0 {

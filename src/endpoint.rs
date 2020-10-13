@@ -1,31 +1,23 @@
+use std::convert::TryInto;
 use std::io;
 use std::net::Ipv4Addr;
-
-use anyhow::{anyhow, Context, Result};
 use std::os::unix::io::{AsRawFd, RawFd};
+
+use anyhow::{anyhow, Result};
 use tun::{platform::posix::Fd, platform::Device as Tun, IntoAddress};
 
 use super::poller::{Event, Poller};
 
 const IP_PACKET_HEADER_MIN_SIZE: usize = 20;
-const IP_PACKET_HEADER_MAX_SIZE: usize = 32;
+// const IP_PACKET_HEADER_MAX_SIZE: usize = 32;
 const MTU: usize = 1500;
 const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
-const POLL_KEY_TUN: usize = 1;
-const POLL_KEY_CONN: usize = 2;
+const POLL_KEY_TUN: usize = 100;
+const POLL_KEY_CONN: usize = 200;
 
 pub struct PeerInfo {
     ip: Ipv4Addr,
-}
-
-pub struct Packet(Vec<u8>);
-
-impl Packet {
-    fn with_capacity(cap: usize) -> Self {
-        // TODO reduce memory allocation with a buffer pool, but that maybe even slower
-        Packet(Vec::with_capacity(cap))
-    }
 }
 
 pub struct Endpoint<Ctr: Connector> {
@@ -57,10 +49,11 @@ impl<Ctr: Connector> Endpoint<Ctr> {
         poller.add(self.conn.as_raw_fd(), Event::readable(POLL_KEY_CONN))?;
 
         let mut events = Vec::new();
-        let mut tun_conn_buf = Vec::with_capacity(DEFAULT_BUF_SIZE);
-        tun_conn_buf.resize(DEFAULT_BUF_SIZE, 0);
-        let mut conn_tun_buf = Vec::with_capacity(DEFAULT_BUF_SIZE);
-        conn_tun_buf.resize(DEFAULT_BUF_SIZE, 0);
+        let mut tun_conn_buf = PacketBuf::with_capacity(DEFAULT_BUF_SIZE);
+        let mut conn_tun_buf = PacketBuf::with_capacity(DEFAULT_BUF_SIZE);
+
+        set_nonblock(self.tun.as_raw_fd())?;
+        set_nonblock(self.conn.as_raw_fd())?;
 
         loop {
             // Wait for at least one I/O event.
@@ -68,34 +61,46 @@ impl<Ctr: Connector> Endpoint<Ctr> {
             poller.wait(&mut events, None)?;
 
             for ev in &events {
-                if ev.key == POLL_KEY_TUN {
-                    copy_packet(&mut tun_conn_buf, &mut self.tun, &mut self.conn)?;
-                    poller.modify(self.tun.as_raw_fd(), Event::readable(ev.key))?;
-                } else if ev.key == POLL_KEY_CONN {
-                    copy_packet(&mut conn_tun_buf, &mut self.conn, &mut self.tun)?;
-                    poller.modify(self.conn.as_raw_fd(), Event::readable(ev.key))?;
+                if ev.key == POLL_KEY_TUN && ev.readable {
+                    handle_readable(
+                        &mut poller,
+                        &mut tun_conn_buf,
+                        &mut self.tun,
+                        &mut self.conn,
+                        POLL_KEY_TUN,
+                        POLL_KEY_CONN,
+                    )?;
+                }
+
+                if ev.key == POLL_KEY_CONN && ev.readable {
+                    handle_readable(
+                        &mut poller,
+                        &mut conn_tun_buf,
+                        &mut self.conn,
+                        &mut self.tun,
+                        POLL_KEY_CONN,
+                        POLL_KEY_TUN,
+                    )?;
+                }
+
+                if ev.key == POLL_KEY_TUN && ev.writable {
+                    if is_blocked(conn_tun_buf.write(&mut self.tun))? {
+                        poller.modify(self.tun.as_raw_fd(), Event::writable(POLL_KEY_TUN))?;
+                    } else {
+                        poller.modify(self.conn.as_raw_fd(), Event::readable(POLL_KEY_CONN))?;
+                    }
+                }
+
+                if ev.key == POLL_KEY_CONN && ev.writable {
+                    if is_blocked(tun_conn_buf.write(&mut self.conn))? {
+                        poller.modify(self.conn.as_raw_fd(), Event::writable(POLL_KEY_CONN))?;
+                    } else {
+                        poller.modify(self.tun.as_raw_fd(), Event::readable(POLL_KEY_TUN))?;
+                    }
                 }
             }
         }
     }
-}
-
-pub fn copy_packet<W: io::Write, R: io::Read>(
-    buf: &mut Vec<u8>,
-    mut src: R,
-    mut dst: W,
-) -> Result<()> {
-    let n = src.read(&mut buf[..]).context("could not read")?;
-    assert!(n < buf.len(), "buffer size is too small");
-    if n == 0 {
-        return Err(anyhow!("read return empty"));
-    }
-    let buf = &buf[..n];
-    dst.write_all(buf)
-        .with_context(|| format!("could not write packet: {:?}", buf))?;
-    dst.flush()
-        .with_context(|| format!("could not flush packet: {:?}", buf))?;
-    Ok(())
 }
 
 pub fn read_peer_info<R: io::Read>(mut r: R) -> io::Result<PeerInfo> {
@@ -111,22 +116,6 @@ pub fn write_peer_info<W: io::Write + Unpin>(mut w: W, peer_info: PeerInfo) -> i
     // TODO add checksum
     w.write_all(&peer_info.ip.octets())?;
     Ok(())
-}
-
-pub fn read_packet<R: io::Read>(mut r: R) -> io::Result<Packet> {
-    use std::convert::TryInto;
-
-    let mut packet = Packet::with_capacity(IP_PACKET_HEADER_MAX_SIZE + MTU);
-
-    let buf = &mut packet.0;
-    buf.resize(IP_PACKET_HEADER_MIN_SIZE, 0); // it won't allocate memory if it is already sufficient
-    r.read_exact(&mut buf[0..IP_PACKET_HEADER_MIN_SIZE])?;
-
-    let len = u16::from_be_bytes(buf[2..4].try_into().unwrap()) as usize;
-    buf.resize(len, 0);
-    r.read_exact(&mut buf[IP_PACKET_HEADER_MIN_SIZE..len])?;
-
-    Ok(packet)
 }
 
 pub fn try_clone_tun_fd(tun: &Tun) -> io::Result<Fd> {
@@ -172,5 +161,120 @@ impl<T: io::Write> io::Write for Connection<T> {
 impl<T: AsRawFd> AsRawFd for Connection<T> {
     fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
+    }
+}
+
+fn is_blocked(res: io::Result<()>) -> io::Result<bool> {
+    match res {
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(e) => Err(e),
+        _ => Ok(false),
+    }
+}
+
+fn handle_readable<R: io::Read + AsRawFd, W: io::Write + AsRawFd>(
+    poller: &mut Poller,
+    buf: &mut PacketBuf,
+    src: &mut R,
+    dst: &mut W,
+    src_key: usize,
+    dst_key: usize,
+) -> io::Result<()> {
+    if is_blocked(buf.read(src))? {
+        poller.modify(src.as_raw_fd(), Event::readable(src_key))?;
+        return Ok(());
+    }
+    if is_blocked(buf.write(dst))? {
+        poller.modify(dst.as_raw_fd(), Event::writable(dst_key))?;
+        return Ok(());
+    }
+
+    poller.modify(src.as_raw_fd(), Event::readable(src_key))
+}
+
+fn set_nonblock(fd: i32) -> io::Result<()> {
+    match unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } {
+        0 => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+struct PacketBuf {
+    buf: Vec<u8>,
+    packet_start: usize,
+    packet_end: usize,
+    packet_length: usize,
+}
+
+impl PacketBuf {
+    fn with_capacity(cap: usize) -> Self {
+        let mut buf = Vec::with_capacity(cap);
+        buf.resize(cap, 0);
+        PacketBuf {
+            buf,
+            packet_start: 0,
+            packet_end: 0,
+            packet_length: 0,
+        }
+    }
+
+    fn read<R: io::Read>(&mut self, r: &mut R) -> io::Result<()> {
+        assert_eq!(
+            self.packet_start, 0,
+            "read is called in the middle of writing"
+        );
+
+        if self.packet_length == 0 {
+            while self.packet_end < IP_PACKET_HEADER_MIN_SIZE {
+                let n = r.read(&mut self.buf[self.packet_end..])?;
+                self.packet_end += n;
+            }
+
+            let header = &self.buf[0..IP_PACKET_HEADER_MIN_SIZE];
+            self.packet_length = u16::from_be_bytes(header[2..4].try_into().unwrap()) as usize;
+            log::trace!("read packet length: {}", self.packet_length);
+        }
+
+        while self.packet_end < self.packet_length {
+            let n = r.read(&mut self.buf[self.packet_end..])?;
+            self.packet_end += n;
+        }
+
+        assert_eq!(
+            self.packet_end, self.packet_length,
+            "one read returned buf should never across multiple packets"
+        );
+        log::trace!("read whole packet: {}", self.packet_end);
+
+        Ok(())
+    }
+
+    fn write<W: io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        if self.packet_length == 0 {
+            return Ok(());
+        }
+
+        assert!(
+            self.packet_end >= self.packet_length,
+            "write is called in the middle of reading, packet_length: {} packet_end: {} packet_length: {}",
+            self.packet_length,
+            self.packet_end,
+            self.packet_length
+        );
+
+        while self.packet_end - self.packet_start > 0 {
+            let n = w.write(&self.buf[self.packet_start..self.packet_end])?;
+            self.packet_start += n;
+        }
+        log::trace!("write packet");
+
+        w.flush()?;
+        log::trace!("flush packet");
+
+        self.packet_start = 0;
+        self.packet_end = 0;
+        self.packet_length = 0;
+
+        Ok(())
     }
 }
