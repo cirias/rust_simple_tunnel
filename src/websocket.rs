@@ -2,12 +2,38 @@ use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 
 use anyhow::anyhow;
-use tungstenite::{accept, client, Error, Message, WebSocket};
+use tungstenite::{
+    accept_hdr, client,
+    handshake::server::{Callback, ErrorResponse, Request, Response},
+    http, Error, Message, WebSocket,
+};
 
 use super::endpoint::*;
 
+pub struct Authentication {
+    pub username: String,
+    pub password: String,
+}
+
+impl Authentication {
+    fn autherization(&self) -> String {
+        let creds = base64::encode(format!("{}:{}", self.username, self.password));
+        format!("Basic {}", creds)
+    }
+}
+
 pub struct ListenConnector<T> {
-    pub connector: T,
+    connector: T,
+    autherization: String,
+}
+
+impl<T> ListenConnector<T> {
+    pub fn new(connector: T, auth: Authentication) -> Self {
+        Self {
+            connector,
+            autherization: auth.autherization(),
+        }
+    }
 }
 
 impl<T: Connector + Send> Connector for ListenConnector<T> {
@@ -15,16 +41,49 @@ impl<T: Connector + Send> Connector for ListenConnector<T> {
 
     fn connect(&self) -> io::Result<Self::Connection> {
         let conn = self.connector.connect()?;
-        let socket = accept(conn).map_err(|_e| {
+        let callback = AutherizationCallback(&self.autherization);
+        let socket = accept_hdr(conn, callback).map_err(|_e| {
             io::Error::new(io::ErrorKind::Other, anyhow!("could not accept websocket"))
         })?;
         Ok(WebSocketReadWriter { inner: socket })
     }
 }
 
+struct AutherizationCallback<'a>(&'a str);
+
+impl<'a> Callback for AutherizationCallback<'a> {
+    fn on_request(self, request: &Request, response: Response) -> Result<Response, ErrorResponse> {
+        let autherization = &request.headers()[http::header::AUTHORIZATION];
+        if autherization != self.0 {
+            let resp = Response::builder()
+                .header(
+                    http::header::WWW_AUTHENTICATE,
+                    "Basic realm=\"access the service\"",
+                )
+                .status(http::StatusCode::UNAUTHORIZED)
+                .body(None)
+                .unwrap();
+            Err(resp)
+        } else {
+            Ok(response)
+        }
+    }
+}
+
 pub struct ClientConnector<T> {
-    pub connector: T,
-    pub url: String,
+    connector: T,
+    uri: String,
+    autherizatoin: String,
+}
+
+impl<T> ClientConnector<T> {
+    pub fn new(connector: T, uri: String, auth: Authentication) -> Self {
+        Self {
+            connector,
+            uri,
+            autherizatoin: auth.autherization(),
+        }
+    }
 }
 
 impl<T: Connector + Send> Connector for ClientConnector<T> {
@@ -32,7 +91,14 @@ impl<T: Connector + Send> Connector for ClientConnector<T> {
 
     fn connect(&self) -> io::Result<Self::Connection> {
         let conn = self.connector.connect()?;
-        let (socket, _resp) = client(self.url.clone(), conn).map_err(|_e| {
+
+        let request = Request::builder()
+            .uri(&self.uri)
+            .header(http::header::AUTHORIZATION, &self.autherizatoin)
+            .body(())
+            .unwrap();
+
+        let (socket, _resp) = client(request, conn).map_err(|_e| {
             io::Error::new(io::ErrorKind::Other, anyhow!("could not connect websocket"))
         })?;
         Ok(WebSocketReadWriter { inner: socket })

@@ -55,7 +55,13 @@ fn try_run(args: Args) -> Result<()> {
                 pkcs12_path: "./identity.pfx".into(),
                 pkcs12_password: "passw0rd".into(),
             };
-            let connector = websocket::ListenConnector { connector };
+            let connector = websocket::ListenConnector::new(
+                connector,
+                websocket::Authentication {
+                    username: "hello".into(),
+                    password: "world".into(),
+                },
+            );
             Endpoint::new(&args.ip, connector)?.run()
         }
         Mode::Client(config) => {
@@ -67,10 +73,14 @@ fn try_run(args: Args) -> Result<()> {
                 hostname: "www.example.com".into(),
                 accept_invalid_certs: true,
             };
-            let connector = websocket::ClientConnector {
+            let connector = websocket::ClientConnector::new(
                 connector,
-                url: "ws://www.example.com/ws".into(),
-            };
+                "ws://www.example.com/ws".into(),
+                websocket::Authentication {
+                    username: "hello".into(),
+                    password: "world".into(),
+                },
+            );
             Endpoint::new(&args.ip, connector)?.run()
         }
     }
