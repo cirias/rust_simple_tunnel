@@ -42,8 +42,11 @@ impl<T: Connector + Send> Connector for ListenConnector<T> {
     fn connect(&self) -> io::Result<Self::Connection> {
         let conn = self.connector.connect()?;
         let callback = AutherizationCallback(&self.autherization);
-        let socket = accept_hdr(conn, callback).map_err(|_e| {
-            io::Error::new(io::ErrorKind::Other, anyhow!("could not accept websocket"))
+        let socket = accept_hdr(conn, callback).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                anyhow!("could not accept websocket: {}", e),
+            )
         })?;
         Ok(WebSocketReadWriter { inner: socket })
     }
@@ -98,8 +101,11 @@ impl<T: Connector + Send> Connector for ClientConnector<T> {
             .body(())
             .unwrap();
 
-        let (socket, _resp) = client(request, conn).map_err(|_e| {
-            io::Error::new(io::ErrorKind::Other, anyhow!("could not connect websocket"))
+        let (socket, _resp) = client(request, conn).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                anyhow!("could not connect websocket: {}", e),
+            )
         })?;
         Ok(WebSocketReadWriter { inner: socket })
     }
@@ -120,7 +126,10 @@ impl<T: io::Write + io::Read> io::Read for WebSocketReadWriter<T> {
         loop {
             let m = self.inner.read_message().map_err(|e| match e {
                 Error::Io(e) if e.kind() == io::ErrorKind::WouldBlock => e,
-                _ => io::Error::new(io::ErrorKind::Other, e),
+                _ => io::Error::new(
+                    io::ErrorKind::Other,
+                    anyhow!("could not read message: {}", e),
+                ),
             })?;
             let received = match m {
                 Message::Binary(received) => received,
@@ -150,15 +159,22 @@ impl<T: io::Write + io::Read> io::Write for WebSocketReadWriter<T> {
             .or_else(|e| match e {
                 // ignore WouldBlock, because in that case, write_message will still queue the message.
                 Error::Io(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
-                _ => Err(io::Error::new(io::ErrorKind::Other, e)),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    anyhow!("could not write message: {}", e),
+                )),
             })?;
 
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner
-            .write_pending()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        self.inner.write_pending().map_err(|e| match e {
+            Error::Io(e) if e.kind() == io::ErrorKind::WouldBlock => e,
+            _ => io::Error::new(
+                io::ErrorKind::Other,
+                anyhow!("could not write pending: {}", e),
+            ),
+        })
     }
 }
