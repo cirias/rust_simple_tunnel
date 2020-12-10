@@ -62,41 +62,37 @@ impl<Ctr: Connector> Endpoint<Ctr> {
 
             for ev in &events {
                 if ev.key == POLL_KEY_TUN && ev.readable {
-                    handle_readable(
-                        &mut poller,
-                        &mut tun_conn_buf,
-                        &mut self.tun,
-                        &mut self.conn,
-                        POLL_KEY_TUN,
-                        POLL_KEY_CONN,
-                    )?;
+                    if is_blocked(tun_conn_buf.read(&mut self.tun))? {
+                        log::debug!("block: read from tun");
+                    }
                 }
 
                 if ev.key == POLL_KEY_CONN && ev.readable {
-                    handle_readable(
-                        &mut poller,
-                        &mut conn_tun_buf,
-                        &mut self.conn,
-                        &mut self.tun,
-                        POLL_KEY_CONN,
-                        POLL_KEY_TUN,
-                    )?;
-                }
-
-                if ev.key == POLL_KEY_TUN && ev.writable {
-                    if is_blocked(conn_tun_buf.write(&mut self.tun))? {
-                        poller.modify(self.tun.as_raw_fd(), Event::writable(POLL_KEY_TUN))?;
-                    } else {
-                        poller.modify(self.conn.as_raw_fd(), Event::readable(POLL_KEY_CONN))?;
+                    if is_blocked(conn_tun_buf.read(&mut self.conn))? {
+                        log::debug!("block: read from conn");
                     }
                 }
 
-                if ev.key == POLL_KEY_CONN && ev.writable {
-                    if is_blocked(tun_conn_buf.write(&mut self.conn))? {
-                        poller.modify(self.conn.as_raw_fd(), Event::writable(POLL_KEY_CONN))?;
+                if ev.key == POLL_KEY_TUN {
+                    if ev.writable && is_blocked(conn_tun_buf.write(&mut self.tun))? {
+                        log::debug!("block: write to tun");
+                        poller.modify(self.tun.as_raw_fd(), Event::all(POLL_KEY_TUN))?;
                     } else {
                         poller.modify(self.tun.as_raw_fd(), Event::readable(POLL_KEY_TUN))?;
                     }
+                } else if conn_tun_buf.ready_to_write() {
+                    poller.modify(self.tun.as_raw_fd(), Event::all(POLL_KEY_TUN))?;
+                }
+
+                if ev.key == POLL_KEY_CONN {
+                    if ev.writable && is_blocked(tun_conn_buf.write(&mut self.conn))? {
+                        log::debug!("block: write to conn");
+                        poller.modify(self.conn.as_raw_fd(), Event::all(POLL_KEY_CONN))?;
+                    } else {
+                        poller.modify(self.conn.as_raw_fd(), Event::readable(POLL_KEY_CONN))?;
+                    }
+                } else if tun_conn_buf.ready_to_write() {
+                    poller.modify(self.conn.as_raw_fd(), Event::all(POLL_KEY_CONN))?;
                 }
             }
         }
@@ -172,26 +168,6 @@ fn is_blocked(res: io::Result<()>) -> io::Result<bool> {
     }
 }
 
-fn handle_readable<R: io::Read + AsRawFd, W: io::Write + AsRawFd>(
-    poller: &mut Poller,
-    buf: &mut PacketBuf,
-    src: &mut R,
-    dst: &mut W,
-    src_key: usize,
-    dst_key: usize,
-) -> io::Result<()> {
-    if is_blocked(buf.read(src))? {
-        poller.modify(src.as_raw_fd(), Event::readable(src_key))?;
-        return Ok(());
-    }
-    if is_blocked(buf.write(dst))? {
-        poller.modify(dst.as_raw_fd(), Event::writable(dst_key))?;
-        return Ok(());
-    }
-
-    poller.modify(src.as_raw_fd(), Event::readable(src_key))
-}
-
 fn set_nonblock(fd: i32) -> io::Result<()> {
     match unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) } {
         0 => Ok(()),
@@ -219,10 +195,10 @@ impl PacketBuf {
     }
 
     fn read<R: io::Read>(&mut self, r: &mut R) -> io::Result<()> {
-        assert_eq!(
-            self.packet_start, 0,
-            "read is called in the middle of writing"
-        );
+        if self.packet_start > 0 {
+            // read is called in the middle of writing
+            return Ok(());
+        }
 
         if self.packet_length == 0 {
             while self.packet_end < IP_PACKET_HEADER_MIN_SIZE {
@@ -249,18 +225,15 @@ impl PacketBuf {
         Ok(())
     }
 
+    fn ready_to_write(&self) -> bool {
+        // has data and is not in the middle of reading
+        return self.packet_length > 0 && self.packet_end >= self.packet_length;
+    }
+
     fn write<W: io::Write>(&mut self, w: &mut W) -> io::Result<()> {
-        if self.packet_length == 0 {
+        if !self.ready_to_write() {
             return Ok(());
         }
-
-        assert!(
-            self.packet_end >= self.packet_length,
-            "write is called in the middle of reading, packet_length: {} packet_end: {} packet_length: {}",
-            self.packet_length,
-            self.packet_end,
-            self.packet_length
-        );
 
         while self.packet_end - self.packet_start > 0 {
             let n = w.write(&self.buf[self.packet_start..self.packet_end])?;
