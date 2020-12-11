@@ -49,12 +49,28 @@ enum Mode {
 struct ClientConfig {
     #[clap(short, long, default_value = "127.0.0.1:3000")]
     server: String,
+    #[clap(short, long, default_value = "www.example.com")]
+    hostname: String,
+    #[clap(short, long)]
+    not_accept_invalid_certs: bool,
+    #[clap(short, long, default_value = "hello")]
+    username: String,
+    #[clap(short, long, default_value = "world")]
+    password: String,
 }
 
 #[derive(Clap)]
 struct ServerConfig {
     #[clap(short, long, default_value = "0.0.0.0:3000")]
     listen: String,
+    #[clap(short, long, default_value = "./identity.pfx")]
+    pkcs12_path: String,
+    #[clap(short, long, default_value = "passw0rd")]
+    pkcs12_password: String,
+    #[clap(short, long, default_value = "hello")]
+    username: String,
+    #[clap(short, long, default_value = "world")]
+    password: String,
 }
 
 fn try_run(args: Args) -> Result<()> {
@@ -63,14 +79,14 @@ fn try_run(args: Args) -> Result<()> {
             let connector = tcp::ListenConnector::new(&config.listen)?;
             let connector = tls::ServerConnector {
                 connector,
-                pkcs12_path: "./identity.pfx".into(),
-                pkcs12_password: "passw0rd".into(),
+                pkcs12_path: config.pkcs12_path,
+                pkcs12_password: config.pkcs12_password,
             };
             let connector = websocket::ListenConnector::new(
                 connector,
                 websocket::Authentication {
-                    username: "hello".into(),
-                    password: "world".into(),
+                    username: config.username,
+                    password: config.password,
                 },
             );
             Endpoint::new(&args.ip, &args.peer_ip, connector)?.run_with_retry();
@@ -82,15 +98,15 @@ fn try_run(args: Args) -> Result<()> {
             };
             let connector = tls::ClientConnector {
                 connector,
-                hostname: "www.example.com".into(),
-                accept_invalid_certs: true,
+                hostname: config.hostname.clone(),
+                accept_invalid_certs: !config.not_accept_invalid_certs,
             };
             let connector = websocket::ClientConnector::new(
                 connector,
-                "ws://www.example.com/ws".into(),
+                format!("wss://{:}/ws", config.hostname),
                 websocket::Authentication {
-                    username: "hello".into(),
-                    password: "world".into(),
+                    username: config.username,
+                    password: config.password,
                 },
             );
             Endpoint::new(&args.ip, &args.peer_ip, connector)?.run_with_retry();
