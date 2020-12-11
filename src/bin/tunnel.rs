@@ -8,12 +8,21 @@ fn main() {
 
     let matches = <Args as IntoApp>::into_app().get_matches();
     let mut args = <Args as FromArgMatches>::from_arg_matches(&matches);
-    if matches.occurrences_of("ip") == 0 {
-        args.ip = match &args.mode {
-            Mode::Server(_) => "192.168.200.1".to_string(),
-            Mode::Client(_) => "192.168.200.2".to_string(),
+    if matches.occurrences_of("ip") == 0 && matches.occurrences_of("peer_ip") == 0 {
+        let default_server_ip = "192.168.200.1".to_string();
+        let default_client_ip = "192.168.200.2".to_string();
+        match &args.mode {
+            Mode::Server(_) => {
+                args.ip = default_server_ip.clone();
+                args.peer_ip = default_client_ip.clone();
+            }
+            Mode::Client(_) => {
+                args.ip = default_client_ip.clone();
+                args.peer_ip = default_server_ip.clone();
+            }
         };
     }
+
     if let Err(e) = try_run(args) {
         eprintln!("{:?}", e);
     }
@@ -22,8 +31,10 @@ fn main() {
 #[derive(Clap)]
 #[clap(version = "0.1")]
 struct Args {
-    #[clap(short, long, default_value = "192.168.200.1")]
+    #[clap(short, long, default_value = "not_used")]
     ip: String,
+    #[clap(short, long, default_value = "not_used")]
+    peer_ip: String,
     #[clap(subcommand)]
     mode: Mode,
 }
@@ -62,7 +73,8 @@ fn try_run(args: Args) -> Result<()> {
                     password: "world".into(),
                 },
             );
-            Endpoint::new(&args.ip, connector)?.run()
+            Endpoint::new(&args.ip, &args.peer_ip, connector)?.run_with_retry();
+            panic!("endpoint exits");
         }
         Mode::Client(config) => {
             let connector = tcp::StreamConnector {
@@ -81,7 +93,8 @@ fn try_run(args: Args) -> Result<()> {
                     password: "world".into(),
                 },
             );
-            Endpoint::new(&args.ip, connector)?.run()
+            Endpoint::new(&args.ip, &args.peer_ip, connector)?.run_with_retry();
+            panic!("endpoint exits");
         }
     }
 }

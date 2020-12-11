@@ -2,9 +2,10 @@ use std::convert::TryInto;
 use std::io;
 use std::net::Ipv4Addr;
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tun::{platform::posix::Fd, platform::Device as Tun, IntoAddress};
+use tun::{platform::posix::Fd, platform::Device as Tun, Device, IntoAddress};
 
 use super::poller::{Event, Poller};
 
@@ -21,28 +22,61 @@ pub struct PeerInfo {
 }
 
 pub struct Endpoint<Ctr: Connector> {
+    connector: Ctr,
     conn: Ctr::Connection,
     tun: Tun,
 }
 
 impl<Ctr: Connector> Endpoint<Ctr> {
-    pub fn new<IP: IntoAddress>(ip: IP, connector: Ctr) -> Result<Self> {
+    pub fn new<IP: IntoAddress>(ip: IP, peer_ip: IP, connector: Ctr) -> Result<Self> {
         let ip = ip.into_address()?;
-        let mut conn = connector.connect()?;
+        let peer_ip = peer_ip.into_address()?;
+        let conn = connector.connect()?;
+        log::info!("connected successfully");
 
-        write_peer_info(&mut conn, PeerInfo { ip })?;
-        let peer_info = read_peer_info(&mut conn)?;
-
-        let peer_ip = peer_info.ip;
         let mut config: tun::Configuration = Default::default();
         config.address(ip).destination(peer_ip).mtu(MTU as i32).up();
         let tun =
             tun::create(&config).or_else(|e| Err(anyhow!("could not create tun: {:?}", e)))?;
+        log::info!(
+            "created interface: {:} address: {:?} destination {:?}",
+            tun.name(),
+            tun.address(),
+            tun.destination()
+        );
 
-        Ok(Self { conn, tun })
+        Ok(Self {
+            connector,
+            conn,
+            tun,
+        })
     }
 
-    pub fn run(mut self) -> Result<()> {
+    pub fn run_with_retry(&mut self) {
+        let mut error_count = 0;
+        loop {
+            let err = self.run().unwrap_err();
+            let d = get_sleep_duration(error_count);
+            error_count += 1;
+            log::error!("{:?}, will reconnect in {:?}", err, d);
+            std::thread::sleep(d);
+            let conn = loop {
+                let err = match self.connector.connect() {
+                    Ok(conn) => break conn,
+                    Err(err) => err,
+                };
+                let d = get_sleep_duration(error_count);
+                error_count += 1;
+                log::error!("could not connect: {:?}, will retry in {:?}", err, d);
+                std::thread::sleep(d);
+            };
+            log::info!("connected successfully");
+            error_count = 0;
+            self.conn = conn;
+        }
+    }
+
+    pub fn run(&mut self) -> Result<()> {
         let mut poller = Poller::new()?;
 
         poller.add(self.tun.as_raw_fd(), Event::readable(POLL_KEY_TUN))?;
@@ -250,4 +284,12 @@ impl PacketBuf {
 
         Ok(())
     }
+}
+
+fn get_sleep_duration(error_count: u32) -> Duration {
+    let mut d = 2u64.pow(error_count);
+    if d > 10 {
+        d = 10;
+    }
+    Duration::from_secs(d)
 }
