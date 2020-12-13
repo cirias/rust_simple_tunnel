@@ -1,18 +1,16 @@
-FROM arm32v7/rust:latest as Builder
+FROM debian:stretch
 
-RUN apt-get update && apt-get install pkg-config libssl-dev -y
+RUN apt-get update && apt-get install -y gcc-arm-linux-gnueabihf curl build-essential && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY .cargo Cargo.* ./
-COPY src ./src
-RUN cargo build --release
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y
+RUN $HOME/.cargo/bin/rustup target add armv7-unknown-linux-gnueabihf
 
-
-FROM arm32v7/debian:latest as Runner
-
-COPY docker/entrypoint.sh /usr/local/bin/
+COPY entrypoint.sh /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-COPY --from=Builder /app/target/release/tunnel /usr/local/bin/
+# buster's glibc is too new
+#
+# FROM rust:1.48-buster
 
-CMD ["tunnel"]
+# RUN apt-get update && apt-get install -y gcc-arm-linux-gnueabihf && rm -rf /var/lib/apt/lists/*
+# RUN rustup target add armv7-unknown-linux-gnueabihf

@@ -14,5 +14,5 @@ tun = "0.5"
 anyhow = "1.0"
 clap = "3.0.0-beta.1"
 tungstenite = { version = "0.11", default-features = false }
-native-tls = "0.2"
+native-tls = { version = "0.2", features = ["vendored"] }
 base64 = "0.12"

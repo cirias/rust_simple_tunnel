@@ -1,0 +1,15 @@
+[Unit]
+Description=Simple tunnel
+After=syslog.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=RUST_LOG=simple_vpn=info
+# Update the args
+ExecStart=/usr/local/bin/tunnel client
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

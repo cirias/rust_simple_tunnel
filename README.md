@@ -1,3 +1,23 @@
+## Install
+
+### Build with Docker
+
+```
+make docker_image_arm32v7
+make docker_build_arm32v7
+```
+
+### Install client
+
+```
+sudo cp target/armv7-unknown-linux-gnueabihf/release/tunnel /usr/local/bin/
+
+# Remember to update the `ExecStart` for command args
+sudo cp systemd/client.service /etc/systemd/system/simple_tunnel.service
+
+sudo systemctl start simple_tunnel.service
+```
+
 ## Test
 
 ### Server Side
