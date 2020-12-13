@@ -52,6 +52,10 @@ impl<Ctr: Connector> Endpoint<Ctr> {
         })
     }
 
+    pub fn tun_name(&self) -> &str {
+        self.tun.name()
+    }
+
     pub fn run_with_retry(&mut self) {
         let mut error_count = 0;
         loop {

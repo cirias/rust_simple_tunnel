@@ -1,4 +1,7 @@
-use anyhow::Result;
+use std::net::ToSocketAddrs;
+use std::process::Command;
+
+use anyhow::{anyhow, Result};
 use clap::{Clap, FromArgMatches, IntoApp};
 
 use simple_vpn::*;
@@ -57,6 +60,8 @@ struct ClientConfig {
     username: String,
     #[clap(short, long, default_value = "world")]
     password: String,
+    #[clap(short, long)]
+    script_path: Option<String>,
 }
 
 #[derive(Clap)]
@@ -90,11 +95,11 @@ fn try_run(args: Args) -> Result<()> {
                 },
             );
             Endpoint::new(&args.ip, &args.peer_ip, connector)?.run_with_retry();
-            panic!("endpoint exits");
+            unreachable!();
         }
         Mode::Client(config) => {
             let connector = tcp::StreamConnector {
-                addr: config.server,
+                addr: &config.server,
             };
             let connector = tls::ClientConnector {
                 connector,
@@ -109,8 +114,44 @@ fn try_run(args: Args) -> Result<()> {
                     password: config.password,
                 },
             );
-            Endpoint::new(&args.ip, &args.peer_ip, connector)?.run_with_retry();
-            panic!("endpoint exits");
+            let mut endpoint = Endpoint::new(&args.ip, &args.peer_ip, connector)?;
+
+            if let Some(script_path) = config.script_path {
+                let mut server_addrs_iter = config.server.to_socket_addrs().unwrap();
+                let server_addr = server_addrs_iter
+                    .next()
+                    .ok_or(anyhow!("could not resolve server address"))?;
+                let server_ip = server_addr.ip();
+                run_script(
+                    &script_path,
+                    &format!("{:}", server_ip),
+                    &args.peer_ip,
+                    endpoint.tun_name(),
+                    "up",
+                )?;
+            }
+
+            endpoint.run_with_retry();
+            unreachable!();
         }
     }
+}
+
+fn run_script(
+    script_path: &str,
+    server_ip: &str,
+    peer_ip: &str,
+    dev: &str,
+    script_type: &str,
+) -> Result<()> {
+    let status = Command::new(script_path)
+        .env("server_ip", server_ip)
+        .env("peer_ip", peer_ip)
+        .env("dev", dev)
+        .env("script_type", script_type)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow!("script {:} failed with: {:}", script_path, status));
+    }
+    return Ok(());
 }
