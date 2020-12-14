@@ -1,5 +1,5 @@
 [package]
-name = "simple_vpn"
+name = "simple_tunnel"
 version = "0.1.0"
 authors = ["Sirius <sirius@x250>"]
 edition = "2018"

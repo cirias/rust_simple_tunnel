@@ -4,7 +4,7 @@ use std::process::Command;
 use anyhow::{anyhow, Result};
 use clap::{Clap, FromArgMatches, IntoApp};
 
-use simple_vpn::*;
+use simple_tunnel::*;
 
 fn main() {
     env_logger::init();
