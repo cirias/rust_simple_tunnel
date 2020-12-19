@@ -22,7 +22,7 @@ up)
   $IP_EXEC route add 128.0.0.0/1 via $peer_ip dev $dev
 
   # Apply DNS
-  R="nameserver 8.8.8.8"
+  R="nameserver 1.1.1.1"
   echo -n "$R" | $RESOLVCONF -x -a "$dev.inet"
   ;;
 down)
