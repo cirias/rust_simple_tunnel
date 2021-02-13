@@ -18,8 +18,24 @@ RUN apt-get update \
     shadowsocks-libev \
   && rm -rf /var/lib/apt/lists/*
 
-COPY docker/shadowsocks/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY docker/shadowsocks/entrypoint.sh /usr/local/bin/
+RUN apt-get update \
+  && apt-get install -y \
+    kmod \
+    iptables \
+    strongswan \
+    strongswan-pki \
+    libcharon-extra-plugins \
+    libstrongswan-extra-plugins \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update \
+  && apt-get install -y \
+    tcpdump \
+    traceroute \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY docker/proxy/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY docker/proxy/entrypoint.sh /usr/local/bin/
 
 COPY scripts /etc/tunnel/scripts
 COPY --from=builder /app/target/release/tunnel /usr/local/bin/
