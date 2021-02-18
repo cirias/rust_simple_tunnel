@@ -1,7 +1,4 @@
-mod endpoint;
-pub mod poller;
-pub mod tcp;
-pub mod tls;
-pub mod websocket;
+mod poller;
 
-pub use endpoint::*;
+pub mod message;
+pub mod sockets;

@@ -59,6 +59,7 @@ impl Poller {
     }
 
     /// Deletes a file descriptor.
+    #[allow(dead_code)]
     pub fn delete(&self, fd: RawFd) -> io::Result<()> {
         log::trace!("remove: epoll_fd={}, fd={}", self.epoll_fd, fd);
         self.ctl(libc::EPOLL_CTL_DEL, fd, None)
@@ -196,6 +197,7 @@ impl Event {
     /// All kinds of events (readable and writable).
     ///
     /// Equivalent to: `Event { key, readable: true, writable: true }`
+    #[allow(dead_code)]
     pub fn all(key: usize) -> Event {
         Event {
             key,
@@ -207,6 +209,7 @@ impl Event {
     /// Only the readable event.
     ///
     /// Equivalent to: `Event { key, readable: true, writable: false }`
+    #[allow(dead_code)]
     pub fn readable(key: usize) -> Event {
         Event {
             key,
@@ -218,6 +221,7 @@ impl Event {
     /// Only the writable event.
     ///
     /// Equivalent to: `Event { key, readable: false, writable: true }`
+    #[allow(dead_code)]
     pub fn writable(key: usize) -> Event {
         Event {
             key,
@@ -229,6 +233,7 @@ impl Event {
     /// No events.
     ///
     /// Equivalent to: `Event { key, readable: false, writable: false }`
+    #[allow(dead_code)]
     pub fn none(key: usize) -> Event {
         Event {
             key,
