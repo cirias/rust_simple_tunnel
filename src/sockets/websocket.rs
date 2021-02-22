@@ -103,6 +103,7 @@ impl TlsTcpListener {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let (tcp_stream, _addr) = self.listener.accept()?;
+        tcp_stream.set_nodelay(true)?;
 
         let tls_stream = tls_acceptor.accept(tcp_stream).map_err(|e| match e {
             native_tls::HandshakeError::Failure(e) => io::Error::new(
@@ -160,6 +161,7 @@ pub fn connect_tls_tcp<A: net::ToSocketAddrs>(
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     let tcp_stream = net::TcpStream::connect(addr)?;
+    tcp_stream.set_nodelay(true)?;
 
     let tls_stream = tls_connector
         .connect(hostname, tcp_stream)
