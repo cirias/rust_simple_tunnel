@@ -1,0 +1,20 @@
+[Unit]
+Description=Simple tunnel for %I
+After=network-online.target nss-lookup.target
+Wants=network-online.target nss-lookup.target
+
+[Service]
+Type=simple
+Environment=RUST_LOG=simple_tunnel=info
+ExecStartPre=/usr/local/bin/tunnel-quick up %i
+ExecStart=/usr/local/bin/tunnel-quick run %i
+ExecStopPost=/usr/local/bin/tunnel-quick down %i
+Restart=always
+RestartSec=100ms
+
+[Unit]
+StartLimitIntervalSec=10s
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

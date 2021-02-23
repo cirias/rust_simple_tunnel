@@ -2,3 +2,5 @@ target
 
 *.pem
 *.pfx
+
+*.conf
