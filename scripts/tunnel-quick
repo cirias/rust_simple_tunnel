@@ -12,48 +12,53 @@ ADDRESS=""
 PEER_ADDRESS=""
 COMMAND_ARGS=""
 PRE_UP=( )
+POST_UP=( )
 PRE_DOWN=( )
+POST_DOWN=( )
 CONFIG_FILE=""
 PROGRAM="${0##*/}"
 ARGS=( "$@" )
+TUNNEL_PID=""
 
 cmd() {
-	echo "[#] $*" >&2
-	"$@"
+  echo "[#] $*" >&2
+  "$@"
 }
 
 die() {
-	echo "$*" >&2
-	exit 1
+  echo "$*" >&2
+  exit 1
 }
 
 parse_options() {
-	local line key value stripped v
-	CONFIG_FILE="$1"
-	[[ $CONFIG_FILE =~ ^[a-zA-Z0-9_=+.-]{1,15}$ ]] && CONFIG_FILE="/etc/tunnel/$CONFIG_FILE.conf"
-	[[ -e $CONFIG_FILE ]] || die "\`$CONFIG_FILE' does not exist"
-	[[ $CONFIG_FILE =~ (^|/)([a-zA-Z0-9_=+.-]{1,15})\.conf$ ]] || die "The config file must be a valid interface name, followed by .conf"
-	CONFIG_FILE="$(readlink -f "$CONFIG_FILE")"
-	((($(stat -c '0%#a' "$CONFIG_FILE") & $(stat -c '0%#a' "${CONFIG_FILE%/*}") & 0007) == 0)) || echo "Warning: \`$CONFIG_FILE' is world accessible" >&2
-	INTERFACE="${BASH_REMATCH[2]}"
-	shopt -s nocasematch
-	while read -r line || [[ -n $line ]]; do
-		stripped="${line%%\#*}"
-		key="${stripped%%=*}"; key="${key##*([[:space:]])}"; key="${key%%*([[:space:]])}"
-		value="${stripped#*=}"; value="${value##*([[:space:]])}"; value="${value%%*([[:space:]])}"
+  local line key value stripped v
+  CONFIG_FILE="$1"
+  [[ $CONFIG_FILE =~ ^[a-zA-Z0-9_=+.-]{1,15}$ ]] && CONFIG_FILE="/etc/tunnel/$CONFIG_FILE.conf"
+  [[ -e $CONFIG_FILE ]] || die "\`$CONFIG_FILE' does not exist"
+  [[ $CONFIG_FILE =~ (^|/)([a-zA-Z0-9_=+.-]{1,15})\.conf$ ]] || die "The config file must be a valid interface name, followed by .conf"
+  CONFIG_FILE="$(readlink -f "$CONFIG_FILE")"
+  ((($(stat -c '0%#a' "$CONFIG_FILE") & $(stat -c '0%#a' "${CONFIG_FILE%/*}") & 0007) == 0)) || echo "Warning: \`$CONFIG_FILE' is world accessible" >&2
+  INTERFACE="${BASH_REMATCH[2]}"
+  shopt -s nocasematch
+  while read -r line || [[ -n $line ]]; do
+    stripped="${line%%\#*}"
+    key="${stripped%%=*}"; key="${key##*([[:space:]])}"; key="${key%%*([[:space:]])}"
+    value="${stripped#*=}"; value="${value##*([[:space:]])}"; value="${value%%*([[:space:]])}"
     case "$key" in
     Address) ADDRESS="$value"; continue ;;
     PeerAddress) PEER_ADDRESS="$value"; continue ;;
     CommandArgs) COMMAND_ARGS="$value"; continue ;;
     PreUp) PRE_UP+=( "$value" ); continue ;;
+    PostUp) POST_UP+=( "$value" ); continue ;;
     PreDown) PRE_DOWN+=( "$value" ); continue ;;
+    PostDown) POST_DOWN+=( "$value" ); continue ;;
     esac
-	done < "$CONFIG_FILE"
-	shopt -u nocasematch
+  done < "$CONFIG_FILE"
+  shopt -u nocasematch
 }
 
 auto_su() {
-	[[ $UID == 0 ]] || exec sudo -p "$PROGRAM must be run as root. Please enter the password for %u to continue: " -- "$BASH" -- "$SELF" "${ARGS[@]}"
+  [[ $UID == 0 ]] || exec sudo -p "$PROGRAM must be run as root. Please enter the password for %u to continue: " -- "$BASH" -- "$SELF" "${ARGS[@]}"
 }
 
 add_if() {
@@ -75,56 +80,64 @@ add_addr() {
 }
 
 execute_hooks() {
-	local hook
-	for hook in "$@"; do
-		hook="${hook//%i/$INTERFACE}"
-		echo "[#] $hook" >&2
-		(eval "$hook")
-	done
+  local hook
+  for hook in "$@"; do
+    hook="${hook//%i/$INTERFACE}"
+    echo "[#] $hook" >&2
+    (eval "$hook")
+  done
 }
 
-cmd_up() {
-	[[ -z $(ip link show dev "$INTERFACE" 2>/dev/null) ]] || die "\`$INTERFACE' already exists"
-	trap 'del_if; exit' INT TERM EXIT
-	add_if
-	add_addr
-	execute_hooks "${PRE_UP[@]}"
-	trap - INT TERM EXIT
-}
-
-cmd_down() {
-	execute_hooks "${PRE_DOWN[@]}"
-	del_if
+background_run_tunnel() {
+  local tunnel="/usr/local/bin/tunnel" run
+  [[ -n "$TUNNEL" ]] && tunnel=$TUNNEL
+  run="$tunnel ${COMMAND_ARGS//%i/$INTERFACE}"
+  echo "[#] $run" >&2
+  eval "$run &"
+  TUNNEL_PID=$!
 }
 
 cmd_run() {
-  local run
-  run="/usr/local/bin/tunnel ${COMMAND_ARGS//%i/$INTERFACE}"
-  echo "[#] $run" >&2
-  (eval "$run")
+  [[ -z $(ip link show dev "$INTERFACE" 2>/dev/null) ]] || die "\`$INTERFACE' already exists"
+  trap 'echo "Terminating..." >&2; cmd_cleanup; exit' INT TERM EXIT
+  add_if
+  add_addr
+  execute_hooks "${PRE_UP[@]}"
+  background_run_tunnel
+  execute_hooks "${POST_UP[@]}"
+  trap - EXIT
+  echo "Waiting tunnel process with PID $TUNNEL_PID" >&2
+  wait $TUNNEL_PID
+  # codes below won't run when a signal is captured,
+  # because trap 'exit' at the end
+  trap - INT TERM
+  cmd_cleanup
+}
+
+cmd_cleanup() {
+  execute_hooks "${PRE_DOWN[@]}"
+  [[ -n $TUNNEL_PID ]] && kill $TUNNEL_PID 2>/dev/null && echo "Killed tunnel process" >&2
+  execute_hooks "${POST_DOWN[@]}"
+  del_if
 }
 
 # ~~ function override insertion point ~~
 
 if [[ $# -eq 1 && ( $1 == --help || $1 == -h || $1 == help ) ]]; then
-	# cmd_usage
+  # cmd_usage
   echo "help: TODO"
-elif [[ $# -eq 2 && $1 == up ]]; then
-  auto_su
-	parse_options "$2"
-	cmd_up
-elif [[ $# -eq 2 && $1 == down ]]; then
-  auto_su
-	parse_options "$2"
-	cmd_down
 elif [[ $# -eq 2 && $1 == run ]]; then
   auto_su
-	parse_options "$2"
-	cmd_run
+  parse_options "$2"
+  cmd_run
+elif [[ $# -eq 2 && $1 == cleanup ]]; then
+  auto_su
+  parse_options "$2"
+  cmd_cleanup
 else
-	# cmd_usage
+  # cmd_usage
   echo "help: TODO"
-	exit 1
+  exit 1
 fi
 
 exit 0
