@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
+use std::fs;
+use std::io;
+use std::net;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::{io, net};
 
 use anyhow::anyhow;
 use tungstenite::{
@@ -8,9 +12,9 @@ use tungstenite::{
     http, Error, Message, WebSocket,
 };
 
-use native_tls::{Identity, Protocol, TlsAcceptor, TlsConnector, TlsStream};
-use std::fs::File;
-use std::io::Read;
+use rustls;
+use rustls::Session;
+use webpki;
 
 use crate::message::{Rx, Tx};
 
@@ -76,7 +80,7 @@ impl<T: io::Write + io::Read> Tx for Socket<T> {
     }
 }
 
-impl AsRawFd for Socket<TlsStream<net::TcpStream>> {
+impl<S: Session> AsRawFd for Socket<rustls::StreamOwned<S, net::TcpStream>> {
     fn as_raw_fd(&self) -> RawFd {
         let tcp_stream = self.web_socket.get_ref().get_ref();
         tcp_stream.as_raw_fd()
@@ -84,37 +88,45 @@ impl AsRawFd for Socket<TlsStream<net::TcpStream>> {
 }
 
 pub struct TlsTcpListener {
-    pub listener: net::TcpListener,
-    pub pkcs12_path: String,
-    pub pkcs12_password: String,
-    pub auth: BasicAuthentication,
+    listener: net::TcpListener,
+    tls_config: Arc<rustls::ServerConfig>,
+    auth: BasicAuthentication,
 }
 
 impl TlsTcpListener {
-    pub fn accept(&self) -> io::Result<Socket<TlsStream<net::TcpStream>>> {
-        let mut file = File::open(&self.pkcs12_path)?;
-        let mut identity = vec![];
-        file.read_to_end(&mut identity)?;
-        let identity = Identity::from_pkcs12(&identity, &self.pkcs12_password)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let tls_acceptor = TlsAcceptor::builder(identity)
-            .min_protocol_version(Some(Protocol::Tlsv12))
-            .build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    pub fn new(
+        listener: net::TcpListener,
+        cert_path: &str,
+        key_path: &str,
+        auth: BasicAuthentication,
+    ) -> io::Result<Self> {
+        let certs = load_certs(&cert_path)?;
+        let key = load_private_key(&key_path)?;
+        let mut tls_config = rustls::ServerConfig::new(rustls::NoClientAuth::new());
+        tls_config.set_single_cert(certs, key).or_else(|e| {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                anyhow!("could not set single cert: {:?}", e),
+            ))
+        })?;
 
-        let (tcp_stream, _addr) = self.listener.accept()?;
+        Ok(Self {
+            listener,
+            tls_config: Arc::new(tls_config),
+            auth,
+        })
+    }
+
+    pub fn accept(
+        &self,
+    ) -> io::Result<Socket<rustls::StreamOwned<rustls::ServerSession, net::TcpStream>>> {
+        let (mut tcp_stream, _addr) = self.listener.accept()?;
         tcp_stream.set_nodelay(true)?;
 
-        let tls_stream = tls_acceptor.accept(tcp_stream).map_err(|e| match e {
-            native_tls::HandshakeError::Failure(e) => io::Error::new(
-                io::ErrorKind::Other,
-                anyhow!("could not connect tls stream: failure: {:?}", e),
-            ),
-            native_tls::HandshakeError::WouldBlock(_) => io::Error::new(
-                io::ErrorKind::WouldBlock,
-                anyhow!("could not connect tls stream: would block"),
-            ),
-        })?;
+        let mut tls_session = rustls::ServerSession::new(&self.tls_config);
+        tls_session.complete_io(&mut tcp_stream)?;
+
+        let tls_stream = rustls::StreamOwned::new(tls_session, tcp_stream);
 
         let callback = AutherizationCallback(self.auth.autherization());
         let web_socket = accept_hdr(tls_stream, callback).map_err(|e| {
@@ -149,48 +161,71 @@ impl Callback for AutherizationCallback {
     }
 }
 
-pub fn connect_tls_tcp<A: net::ToSocketAddrs>(
-    addr: A,
-    hostname: &str,
-    accept_invalid_certs: bool,
+pub struct TlsTcpConnector {
+    hostname: webpki::DNSName,
+    tls_config: Arc<rustls::ClientConfig>,
     auth: BasicAuthentication,
-) -> io::Result<Socket<TlsStream<net::TcpStream>>> {
-    let tls_connector = TlsConnector::builder()
-        .danger_accept_invalid_certs(accept_invalid_certs)
-        .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+}
 
-    let tcp_stream = net::TcpStream::connect(addr)?;
-    tcp_stream.set_nodelay(true)?;
+impl TlsTcpConnector {
+    pub fn new(hostname: &str, ca_cert_path: &str, auth: BasicAuthentication) -> io::Result<Self> {
+        let mut tls_config = rustls::ClientConfig::new();
+        let ca_cert_file = fs::File::open(ca_cert_path)?;
+        let mut ca_cert_reader = io::BufReader::new(ca_cert_file);
+        tls_config
+            .root_store
+            .add_pem_file(&mut ca_cert_reader)
+            .or_else(|_e| {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    anyhow!("could not add ca cert"),
+                ))
+            })?;
 
-    let tls_stream = tls_connector
-        .connect(hostname, tcp_stream)
-        .map_err(|e| match e {
-            native_tls::HandshakeError::Failure(e) => io::Error::new(
+        let hostname = webpki::DNSNameRef::try_from_ascii_str(hostname)
+            .or_else(|e| {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    anyhow!("invalid hostname: {:?}", e),
+                ))
+            })?
+            .to_owned();
+
+        Ok(Self {
+            hostname,
+            tls_config: Arc::new(tls_config),
+            auth,
+        })
+    }
+
+    pub fn connect<A: net::ToSocketAddrs>(
+        &self,
+        addr: A,
+    ) -> io::Result<Socket<rustls::StreamOwned<rustls::ClientSession, net::TcpStream>>> {
+        let mut tcp_stream = net::TcpStream::connect(addr)?;
+        tcp_stream.set_nodelay(true)?;
+
+        let mut tls_session = rustls::ClientSession::new(&self.tls_config, self.hostname.as_ref());
+        tls_session.complete_io(&mut tcp_stream)?;
+
+        let tls_stream = rustls::StreamOwned::new(tls_session, tcp_stream);
+
+        let uri = format!("wss://{:}/ws", AsRef::<str>::as_ref(&self.hostname));
+        let request = Request::builder()
+            .uri(&uri)
+            .header(http::header::AUTHORIZATION, self.auth.autherization())
+            .body(())
+            .unwrap();
+
+        let (web_socket, _resp) = client(request, tls_stream).map_err(|e| {
+            io::Error::new(
                 io::ErrorKind::Other,
-                anyhow!("could not connect tls stream: failure: {:?}", e),
-            ),
-            native_tls::HandshakeError::WouldBlock(_) => io::Error::new(
-                io::ErrorKind::WouldBlock,
-                anyhow!("could not connect tls stream: would block"),
-            ),
+                anyhow!("could not connect websocket: {}", e),
+            )
         })?;
 
-    let uri = format!("wss://{:}/ws", hostname);
-    let request = Request::builder()
-        .uri(&uri)
-        .header(http::header::AUTHORIZATION, auth.autherization())
-        .body(())
-        .unwrap();
-
-    let (web_socket, _resp) = client(request, tls_stream).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            anyhow!("could not connect websocket: {}", e),
-        )
-    })?;
-
-    Ok(Socket { web_socket })
+        Ok(Socket { web_socket })
+    }
 }
 
 pub struct BasicAuthentication {
@@ -203,4 +238,35 @@ impl BasicAuthentication {
         let creds = base64::encode(format!("{}:{}", self.username, self.password));
         format!("Basic {}", creds)
     }
+}
+
+fn load_private_key(filename: &str) -> io::Result<rustls::PrivateKey> {
+    let keyfile = fs::File::open(filename)?;
+    let mut reader = io::BufReader::new(keyfile);
+    let keys = rustls::internal::pemfile::rsa_private_keys(&mut reader).or_else(|_e| {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            anyhow!("file contains invalid rsa private key"),
+        ))
+    })?;
+
+    if keys.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            anyhow!("file does not contain any rsa private key"),
+        ));
+    }
+
+    Ok(keys[0].clone())
+}
+
+fn load_certs(filename: &str) -> io::Result<Vec<rustls::Certificate>> {
+    let certfile = fs::File::open(filename)?;
+    let mut reader = io::BufReader::new(certfile);
+    rustls::internal::pemfile::certs(&mut reader).or_else(|_e| {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            anyhow!("file contains invalid cert"),
+        ))
+    })
 }

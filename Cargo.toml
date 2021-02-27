@@ -13,6 +13,7 @@ env_logger = "0.7"
 tun = "0.5"
 anyhow = "1.0"
 clap = "3.0.0-beta.1"
+rustls = "0.19"
+webpki = "0.21"
 tungstenite = { version = "0.11", default-features = false }
-native-tls = { version = "0.2", features = ["vendored"] }
 base64 = "0.12"

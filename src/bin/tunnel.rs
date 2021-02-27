@@ -36,29 +36,29 @@ enum Mode {
 
 #[derive(Clap)]
 struct ClientConfig {
-    #[clap(short, long, default_value = "127.0.0.1:3000")]
+    #[clap(long, default_value = "127.0.0.1:3000")]
     server: String,
-    #[clap(short, long, default_value = "www.example.com")]
+    #[clap(long, default_value = "www.example.com")]
     hostname: String,
-    #[clap(short, long)]
-    not_accept_invalid_certs: bool,
-    #[clap(short, long, default_value = "hello")]
+    #[clap(long, default_value = "./ca_cert.pem")]
+    ca_cert_path: String,
+    #[clap(long, default_value = "hello")]
     username: String,
-    #[clap(short, long, default_value = "world")]
+    #[clap(long, default_value = "world")]
     password: String,
 }
 
 #[derive(Clap)]
 struct ServerConfig {
-    #[clap(short, long, default_value = "0.0.0.0:3000")]
+    #[clap(long, default_value = "0.0.0.0:3000")]
     listen: String,
-    #[clap(short, long, default_value = "./identity.pfx")]
-    pkcs12_path: String,
-    #[clap(short, long, default_value = "passw0rd")]
-    pkcs12_password: String,
-    #[clap(short, long, default_value = "hello")]
+    #[clap(long, default_value = "./cert.pem")]
+    cert_path: String,
+    #[clap(long, default_value = "./key.pem")]
+    key_path: String,
+    #[clap(long, default_value = "hello")]
     username: String,
-    #[clap(short, long, default_value = "world")]
+    #[clap(long, default_value = "world")]
     password: String,
 }
 
@@ -80,14 +80,10 @@ fn run_client(args: &Args, config: &ClientConfig) -> Result<()> {
         username: config.username.clone(),
         password: config.password.clone(),
     };
-
-    let ws = sockets::websocket::connect_tls_tcp(
-        &config.server,
-        &config.hostname,
-        !config.not_accept_invalid_certs,
-        auth,
-    )
-    .or_else(|e| Err(anyhow!("could not connect to server: {:?}", e)))?;
+    let ws = sockets::websocket::TlsTcpConnector::new(&config.hostname, &config.ca_cert_path, auth)
+        .or_else(|e| Err(anyhow!("could not create connector: {:?}", e)))?
+        .connect(&config.server)
+        .or_else(|e| Err(anyhow!("could not connect to server: {:?}", e)))?;
 
     message::run(ws, tun).or_else(|e| Err(anyhow!("could not run loop: {:?}", e)))
 }
@@ -106,12 +102,13 @@ fn run_server(args: &Args, config: &ServerConfig) -> Result<()> {
 
     let tcp_listener = net::TcpListener::bind(&config.listen)
         .or_else(|e| Err(anyhow!("could not bind tcp listenr: {:?}", e)))?;
-    let ws = sockets::websocket::TlsTcpListener {
-        listener: tcp_listener,
-        pkcs12_path: config.pkcs12_path.clone(),
-        pkcs12_password: config.pkcs12_password.clone(),
+    let ws = sockets::websocket::TlsTcpListener::new(
+        tcp_listener,
+        &config.cert_path,
+        &config.key_path,
         auth,
-    }
+    )
+    .or_else(|e| Err(anyhow!("could not create listener: {:?}", e)))?
     .accept()
     .or_else(|e| Err(anyhow!("could not accept client: {:?}", e)))?;
 
