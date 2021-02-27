@@ -54,33 +54,33 @@ ip address add dev tun0 192.168.200.2 peer 192.168.200.1
 # echo -n "nameserver 1.1.1.1" | resolvconf -x -a "tun0.inet"
 ```
 
-Then create the cert for the websocket server. The outputted `identity.pfx` will be used to run tunnel server. It's better to run these commands on the server, for safety and convenience.
+Then create the TLS certs. See [doc/cert.md](https://github.com/cirias/rust_simple_tunnel/blob/master/doc/cert.md) for the details.
+Remember to copy the certs and key to server or client accordingly.
+
+Now let's start `tunnel` on the server.
 
 ```
-umask 077
-openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365
-openssl pkcs12 -export -out identity.pfx -inkey key.pem -in cert.pem
-# NOTE: remember the cert password, we will need it in the next step
-```
-
-Now let's start `tunnel` on the server
-
-```
-tunnel --tun-name tun0 server --listen 0.0.0.0:443 --username steven --password sekr0t --pkcs12-password <cert password> --pkcs12-path ./identity.pfx
+tunnel --tun-name tun0 server --listen 0.0.0.0:443 --username steven --password sekr0t --cert-path cert.pem --key-path key.pem
 ```
 
 Time to start the `tunnel` on the client. The `--hostname` is just a fake value used in the http request header, choose whatever you want.
 
 ```
-tunnel --tun-name tun0 server --server 12.34.56.78:443 --hostname www.example.com --username steven --password sekr0t
+tunnel --tun-name tun0 server --server 12.34.56.78:443 --hostname www.example.com --username steven --password sekr0t --ca-cert-path ca_cert.pem
 ```
 
-If everything works fine, you may consider to create a systemd unit for the tunnel process. Here is a template you can start with.
+You can test with a simple ping from both server or client.
+
+```
+ping 192.168.200.2 # on server
+ping 192.168.200.1 # on client
+```
+
+And if everything works fine, you may consider to create a systemd unit for the tunnel process. Here is a template you can start with.
 
 ```
 # Remember to update the `ExecStart` for command args
-cp systemd/client.service /etc/systemd/system/simple_tunnel.service
-systemctl start simple_tunnel.service
+cp systemd/tunnel-quick@.service /etc/systemd/system/tunnel-quick@.service
 ```
 
 ## Development Tips
@@ -108,7 +108,7 @@ make docker_run
 ip tuntap add mod tun name tun0
 ip address add dev tun0 192.168.200.2 peer 192.168.200.1
 
-RUST_LOG=simple_tunnel=debug ./target/release/tunnel client -s 172.17.0.2:3000 &
+RUST_LOG=simple_tunnel=debug ./target/release/tunnel client --server 172.17.0.2:3000 &
 ```
 
 ### Useful Commands
@@ -118,4 +118,18 @@ RUST_LOG=simple_tunnel=debug ./target/release/tunnel client -s 172.17.0.2:3000 &
 # `-s` set the packet size
 # `-i` set the interval of each packet
 ping -s 1300 -i 0.01 192.168.200.1
+```
+
+#### Network Simulation
+
+- https://wiki.linuxfoundation.org/networking/netem#examples
+
+__NOTE__
+
+```
+# List rules
+tc -p qdisc ls dev eth0
+
+# Delete rules
+tc qdisc del dev eth0 root
 ```
