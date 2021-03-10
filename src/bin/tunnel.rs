@@ -2,6 +2,7 @@ use std::net;
 
 use anyhow::{anyhow, Result};
 use clap::Clap;
+use rand;
 
 use tun;
 
@@ -74,18 +75,38 @@ fn run_client(args: &Args, config: &ClientConfig) -> Result<()> {
     tun_config.name(&args.tun_name).mtu(args.tun_mtu).up();
     let tun =
         tun::create(&tun_config).or_else(|e| Err(anyhow!("could not create tun: {:?}", e)))?;
-    let tun = sockets::read_write::Socket(tun);
+    let mut tun = sockets::read_write::Socket(tun);
 
     let auth = sockets::websocket::BasicAuthentication {
         username: config.username.clone(),
         password: config.password.clone(),
     };
-    let ws = sockets::websocket::TlsTcpConnector::new(&config.hostname, &config.ca_cert_path, auth)
-        .or_else(|e| Err(anyhow!("could not create connector: {:?}", e)))?
-        .connect(&config.server)
-        .or_else(|e| Err(anyhow!("could not connect to server: {:?}", e)))?;
 
-    message::run(ws, tun).or_else(|e| Err(anyhow!("could not run loop: {:?}", e)))
+    let ws_client =
+        sockets::websocket::TlsTcpConnector::new(&config.hostname, &config.ca_cert_path, auth)
+            .or_else(|e| Err(anyhow!("could not create connector: {:?}", e)))?;
+
+    let sleep_ms = 200;
+    loop {
+        let ws = match ws_client
+            .connect(&config.server)
+            .or_else(|e| Err(anyhow!("could not connect to server: {:?}", e)))
+        {
+            Err(e) => {
+                eprintln!("{:?}, will retry", e);
+                let jitter_ms = rand::random::<u16>() >> 6; // 0 - 1023
+                std::thread::sleep(std::time::Duration::from_millis(
+                    sleep_ms + jitter_ms as u64,
+                ));
+                continue;
+            }
+            Ok(ws) => ws,
+        };
+
+        message::run(ws, &mut tun)
+            .or_else(|e| Err(anyhow!("could not run loop: {:?}", e)))
+            .unwrap_or_else(|e| eprintln!("{:?}, will retry", e));
+    }
 }
 
 fn run_server(args: &Args, config: &ServerConfig) -> Result<()> {
@@ -93,7 +114,7 @@ fn run_server(args: &Args, config: &ServerConfig) -> Result<()> {
     tun_config.name(&args.tun_name).mtu(args.tun_mtu).up();
     let tun =
         tun::create(&tun_config).or_else(|e| Err(anyhow!("could not create tun: {:?}", e)))?;
-    let tun = sockets::read_write::Socket(tun);
+    let mut tun = sockets::read_write::Socket(tun);
 
     let auth = sockets::websocket::BasicAuthentication {
         username: config.username.clone(),
@@ -112,5 +133,5 @@ fn run_server(args: &Args, config: &ServerConfig) -> Result<()> {
     .accept()
     .or_else(|e| Err(anyhow!("could not accept client: {:?}", e)))?;
 
-    message::run(ws, tun).or_else(|e| Err(anyhow!("could not run loop: {:?}", e)))
+    message::run(ws, &mut tun).or_else(|e| Err(anyhow!("could not run loop: {:?}", e)))
 }
