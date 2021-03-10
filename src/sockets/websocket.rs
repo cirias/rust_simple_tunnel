@@ -16,6 +16,7 @@ use tungstenite::{
 use rustls;
 use rustls::Session;
 use webpki;
+use webpki_roots;
 
 use crate::message::{Rx, Tx};
 
@@ -181,6 +182,9 @@ impl TlsTcpConnector {
         let mut tls_config = rustls::ClientConfig::new();
         let ca_cert_file = fs::File::open(ca_cert_path)?;
         let mut ca_cert_reader = io::BufReader::new(ca_cert_file);
+        tls_config
+            .root_store
+            .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
         tls_config
             .root_store
             .add_pem_file(&mut ca_cert_reader)
