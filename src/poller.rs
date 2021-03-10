@@ -53,6 +53,7 @@ impl Poller {
     }
 
     /// Modifies an existing file descriptor.
+    #[allow(dead_code)]
     pub fn modify(&self, fd: RawFd, ev: Event) -> io::Result<()> {
         log::trace!("modify: epoll_fd={}, fd={}, ev={:?}", self.epoll_fd, fd, ev);
         self.ctl(libc::EPOLL_CTL_MOD, fd, Some(ev))
@@ -113,7 +114,7 @@ impl Poller {
     /// Passes arguments to `epoll_ctl`.
     fn ctl(&self, op: libc::c_int, fd: RawFd, ev: Option<Event>) -> io::Result<()> {
         let mut ev = ev.map(|ev| {
-            let mut flags = libc::EPOLLONESHOT;
+            let mut flags = libc::EPOLLET;
             if ev.readable {
                 flags |= read_flags();
             }

@@ -17,8 +17,8 @@ pub fn run<T1: Rx + Tx + AsRawFd, T2: Rx + Tx + AsRawFd>(mut a: T1, mut b: T2) -
     let mut ba_buf = MessageBuffer::new();
 
     let mut poller = Poller::new()?;
-    poller.add(a.as_raw_fd(), Event::readable(POLL_KEY_A))?;
-    poller.add(b.as_raw_fd(), Event::readable(POLL_KEY_B))?;
+    poller.add(a.as_raw_fd(), Event::all(POLL_KEY_A))?;
+    poller.add(b.as_raw_fd(), Event::all(POLL_KEY_B))?;
 
     loop {
         // Wait for at least one I/O event.
@@ -26,38 +26,39 @@ pub fn run<T1: Rx + Tx + AsRawFd, T2: Rx + Tx + AsRawFd>(mut a: T1, mut b: T2) -
         poller.wait(&mut events, None)?;
 
         for ev in &events {
-            if ev.key == POLL_KEY_A {
-                if ev.readable && is_blocked(ab_buf.read(&mut a))? {
-                    log::debug!("block: read from a");
-                }
-                if ev.writable && is_blocked(ba_buf.write(&mut a))? {
-                    log::debug!("block: write to a");
+            if (ev.key == POLL_KEY_A && ev.readable) || (ev.key == POLL_KEY_B && ev.writable) {
+                let mut is_first_time = true;
+                loop {
+                    if ev.readable || !is_first_time {
+                        if is_blocked(ab_buf.read(&mut a))? {
+                            log::debug!("block: read from a");
+                            break;
+                        }
+                    }
+                    if is_blocked(ab_buf.write(&mut b))? {
+                        log::debug!("block: write to b");
+                        break;
+                    }
+                    is_first_time = false
                 }
             }
 
-            if ev.key == POLL_KEY_B {
-                if ev.readable && is_blocked(ba_buf.read(&mut b))? {
-                    log::debug!("block: read from b");
+            if (ev.key == POLL_KEY_B && ev.readable) || (ev.key == POLL_KEY_A && ev.writable) {
+                let mut is_first_time = true;
+                loop {
+                    if ev.readable || !is_first_time {
+                        if is_blocked(ba_buf.read(&mut b))? {
+                            log::debug!("block: read from b");
+                            break;
+                        }
+                    }
+                    if is_blocked(ba_buf.write(&mut a))? {
+                        log::debug!("block: write to a");
+                        break;
+                    }
+                    is_first_time = false
                 }
-                if ev.writable && is_blocked(ab_buf.write(&mut b))? {
-                    log::debug!("block: write to b");
-                }
             }
-
-            let mut a_event = Event::none(POLL_KEY_A);
-            let mut b_event = Event::none(POLL_KEY_B);
-            if ab_buf.empty() {
-                a_event.readable = true;
-            } else {
-                b_event.writable = true;
-            }
-            if ba_buf.empty() {
-                b_event.readable = true;
-            } else {
-                a_event.writable = true;
-            }
-            poller.modify(a.as_raw_fd(), a_event)?;
-            poller.modify(b.as_raw_fd(), b_event)?;
         }
     }
 }
