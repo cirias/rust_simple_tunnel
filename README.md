@@ -127,6 +127,9 @@ ping -s 1300 -i 0.01 192.168.200.1
 __NOTE__
 
 ```
+tc qdisc add dev eth0 root netem delay 100ms
+tc qdisc change dev eth0 root netem loss 0.3% 25% delay 100ms 20ms distribution normal
+
 # List rules
 tc -p qdisc ls dev eth0
 
