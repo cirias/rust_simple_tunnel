@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use std::fs;
 use std::io;
+use std::io::Seek;
 use std::net;
 use std::os::unix::io::{AsRawFd, RawFd};
 
@@ -101,14 +102,22 @@ impl TlsTcpListener {
         auth: BasicAuthentication,
     ) -> io::Result<Self> {
         let certs = load_certs(&cert_path)?;
-        let key = load_private_key(&key_path)?;
+        let keys = load_private_keys(&key_path)?;
+        if keys.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                anyhow!("file {:} does not contain any private key", &key_path),
+            ));
+        }
         let mut tls_config = rustls::ServerConfig::new(rustls::NoClientAuth::new());
-        tls_config.set_single_cert(certs, key).or_else(|e| {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                anyhow!("could not set single cert: {:?}", e),
-            ))
-        })?;
+        tls_config
+            .set_single_cert(certs, keys[0].clone())
+            .or_else(|e| {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    anyhow!("could not set single cert: {:?}", e),
+                ))
+            })?;
 
         Ok(Self {
             listener,
@@ -240,24 +249,27 @@ impl BasicAuthentication {
     }
 }
 
-fn load_private_key(filename: &str) -> io::Result<rustls::PrivateKey> {
+fn load_private_keys(filename: &str) -> io::Result<Vec<rustls::PrivateKey>> {
     let keyfile = fs::File::open(filename)?;
     let mut reader = io::BufReader::new(keyfile);
-    let keys = rustls::internal::pemfile::rsa_private_keys(&mut reader).or_else(|_e| {
+    let mut keys = rustls::internal::pemfile::pkcs8_private_keys(&mut reader).or_else(|_e| {
         Err(io::Error::new(
             io::ErrorKind::Other,
-            anyhow!("file contains invalid rsa private key"),
+            anyhow!("file contains invalid private key"),
         ))
     })?;
 
     if keys.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            anyhow!("file does not contain any rsa private key"),
-        ));
+        reader.seek(io::SeekFrom::Start(0))?;
+        keys = rustls::internal::pemfile::rsa_private_keys(&mut reader).or_else(|_e| {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                anyhow!("file contains invalid rsa private key"),
+            ))
+        })?;
     }
 
-    Ok(keys[0].clone())
+    Ok(keys)
 }
 
 fn load_certs(filename: &str) -> io::Result<Vec<rustls::Certificate>> {
