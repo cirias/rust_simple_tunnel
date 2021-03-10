@@ -18,7 +18,7 @@ use rustls::Session;
 use webpki;
 use webpki_roots;
 
-use crate::message::{Rx, Tx};
+use crate::datagram::{Rx, Tx};
 
 pub struct Socket<T> {
     web_socket: WebSocket<T>,

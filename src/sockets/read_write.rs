@@ -1,7 +1,7 @@
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 
-use crate::message::{Rx, Tx};
+use crate::datagram::{Rx, Tx};
 
 pub struct Socket<T>(pub T);
 

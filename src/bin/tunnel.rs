@@ -103,7 +103,7 @@ fn run_client(args: &Args, config: &ClientConfig) -> Result<()> {
             Ok(ws) => ws,
         };
 
-        message::run(ws, &mut tun)
+        datagram::run(ws, &mut tun)
             .or_else(|e| Err(anyhow!("could not run loop: {:?}", e)))
             .unwrap_or_else(|e| eprintln!("{:?}, will retry", e));
     }
@@ -133,5 +133,5 @@ fn run_server(args: &Args, config: &ServerConfig) -> Result<()> {
     .accept()
     .or_else(|e| Err(anyhow!("could not accept client: {:?}", e)))?;
 
-    message::run(ws, &mut tun).or_else(|e| Err(anyhow!("could not run loop: {:?}", e)))
+    datagram::run(ws, &mut tun).or_else(|e| Err(anyhow!("could not run loop: {:?}", e)))
 }

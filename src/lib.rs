@@ -1,4 +1,4 @@
 mod poller;
 
-pub mod message;
+pub mod datagram;
 pub mod sockets;
