@@ -1,4 +1,4 @@
-.PHONY: docker_image docker_server docker_client docker_image_arm32v7 docker_build_arm32v7
+.PHONY: docker_image docker_build docker_run docker_image_arm32v7 docker_build_arm32v7
 
 docker_image:
 	docker build -f docker/default.dockerfile docker -t simple_tunnel
