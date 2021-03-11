@@ -13,8 +13,8 @@ pub fn run<T1: Rx + Tx + AsRawFd, T2: Rx + Tx + AsRawFd>(mut a: T1, mut b: T2) -
     set_nonblock(b.as_raw_fd())?;
 
     let mut events = Vec::new();
-    let mut ab_buf = MessageBuffer::new();
-    let mut ba_buf = MessageBuffer::new();
+    let mut ab_buf = DatagramBuffer::new();
+    let mut ba_buf = DatagramBuffer::new();
 
     let mut poller = Poller::new()?;
     poller.add(a.as_raw_fd(), Event::all(POLL_KEY_A))?;
@@ -27,38 +27,39 @@ pub fn run<T1: Rx + Tx + AsRawFd, T2: Rx + Tx + AsRawFd>(mut a: T1, mut b: T2) -
 
         for ev in &events {
             if (ev.key == POLL_KEY_A && ev.readable) || (ev.key == POLL_KEY_B && ev.writable) {
-                let mut is_first_time = true;
-                loop {
-                    if ev.readable || !is_first_time {
-                        if is_blocked(ab_buf.read(&mut a))? {
-                            log::debug!("block: read from a");
-                            break;
-                        }
-                    }
-                    if is_blocked(ab_buf.write(&mut b))? {
-                        log::debug!("block: write to b");
-                        break;
-                    }
-                    is_first_time = false
-                }
+                ab_buf.read_write(&mut a, &mut b).no_block()?;
             }
-
             if (ev.key == POLL_KEY_B && ev.readable) || (ev.key == POLL_KEY_A && ev.writable) {
-                let mut is_first_time = true;
-                loop {
-                    if ev.readable || !is_first_time {
-                        if is_blocked(ba_buf.read(&mut b))? {
-                            log::debug!("block: read from b");
-                            break;
-                        }
-                    }
-                    if is_blocked(ba_buf.write(&mut a))? {
-                        log::debug!("block: write to a");
-                        break;
-                    }
-                    is_first_time = false
-                }
+                ba_buf.read_write(&mut b, &mut a).no_block()?;
             }
+        }
+    }
+}
+
+struct DatagramBuffer {
+    buf: [u8; 2048],
+    size: usize,
+}
+
+impl DatagramBuffer {
+    fn new() -> Self {
+        Self {
+            buf: [0u8; 2048],
+            size: 0,
+        }
+    }
+
+    fn read_write<S: Rx, D: Tx>(&mut self, src: &mut S, dst: &mut D) -> io::Result<()> {
+        if self.size == 0 {
+            self.size += src.recv(&mut self.buf)?;
+            assert!(self.size > 0, "should not read size zero");
+        }
+        loop {
+            self.size -= dst.send(&self.buf[..self.size])?;
+            assert_eq!(self.size, 0, "should send full datagram at once");
+            dst.flush()?;
+            self.size += src.recv(&mut self.buf)?;
+            assert!(self.size > 0, "should not read size zero");
         }
     }
 }
@@ -70,57 +71,18 @@ fn set_nonblock(fd: i32) -> io::Result<()> {
     }
 }
 
-fn is_blocked(res: io::Result<()>) -> io::Result<bool> {
-    match res {
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(true),
-        Err(e) => Err(e),
-        _ => Ok(false),
-    }
+pub trait NonBlockingResult<T> {
+    fn no_block(self) -> io::Result<Option<T>>;
 }
 
-struct MessageBuffer {
-    buf: [u8; 2048],
-    size: usize,
-    pending: bool,
-}
-
-impl MessageBuffer {
-    fn new() -> Self {
-        Self {
-            buf: [0u8; 2048],
-            size: 0,
-            pending: false,
+impl<T> NonBlockingResult<T> for io::Result<T> {
+    fn no_block(self) -> io::Result<Option<T>> {
+        match self {
+            Ok(x) => Ok(Some(x)),
+            Err(e) => match e.kind() {
+                io::ErrorKind::WouldBlock => Ok(None),
+                _ => Err(e),
+            },
         }
-    }
-
-    fn empty(&self) -> bool {
-        !self.pending
-    }
-
-    fn read<R: Rx>(&mut self, socket: &mut R) -> io::Result<()> {
-        if !self.empty() {
-            return Ok(());
-        }
-        self.size = socket.recv(&mut self.buf)?;
-        self.pending = true;
-
-        Ok(())
-    }
-
-    fn write<T: Tx>(&mut self, socket: &mut T) -> io::Result<()> {
-        if self.empty() {
-            return Ok(());
-        }
-
-        while self.size > 0 {
-            let n = socket.send(&self.buf[..self.size])?;
-            assert_eq!(n, self.size, "should send full message at once");
-            self.size = 0;
-        }
-
-        socket.flush()?;
-        self.pending = false;
-
-        Ok(())
     }
 }
